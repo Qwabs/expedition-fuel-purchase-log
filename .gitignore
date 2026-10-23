@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.DS_Store
+backups/
+*.crdownload
+
+# Live/private data
+EXPEDITION_FUEL_PURCHASE_MASTER_LOG_*.xlsx
+REMOTE_UPDATE.md
+Fuel_Purchase_Log_2026.xlsx

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { --green:#1E4D3D; --gold:#B08D57; --ink:#374151; --line:#D6DDD8; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
+    body {
+      margin: 0; padding: 14px 14px 18px;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 12px; color: var(--ink); background: #FFFFFF;
+    }
+    h2 {
+      margin: 0 0 4px; font-size: 16px; color: var(--green);
+      letter-spacing: .01em;
+    }
+    .hint {
+      margin: 0 0 14px; font-size: 10.5px; color: #6B7280; line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    label { display: block; margin: 10px 0 4px; font-size: 10.5px; font-weight: bold; }
+    input, select {
+      width: 100%; max-width: 100%; min-width: 0; padding: 6px 7px;
+      border: 1px solid var(--line); border-radius: 3px; font: inherit;
+      background: #FFF; color: var(--ink);
+    }
+    input:focus, select:focus { outline: 2px solid rgba(176,141,87,.35); border-color: var(--gold); }
+    button {
+      margin-top: 14px; width: 100%; max-width: 100%; padding: 9px 10px;
+      border: 0; border-radius: 3px; background: var(--green); color: #FFF;
+      font: bold 12px Arial, sans-serif; cursor: pointer;
+    }
+    button:hover { background: #163B2F; }
+    button:disabled { background: #9CA3AF; cursor: default; }
+    #status {
+      margin-top: 10px; padding: 8px 9px; border-radius: 3px;
+      font-size: 10.5px; line-height: 1.4; display: none;
+    }
+    #status.ok { display: block; background: #EAF4EE; color: #1E4D3D; border: 1px solid #BFD8C8; }
+    #status.err { display: block; background: #FDE2E1; color: #9C0006; border: 1px solid #F2B8B5; }
+    .note {
+      margin: 14px 0 0; padding-top: 10px; border-top: 1px solid var(--line);
+      font-size: 10px; color: #6B7280; line-height: 1.45;
+    }
+    .year-note { margin-top: 4px; font-size: 10px; color: #6B7280; }
+  </style>
+</head>
+<body>
+  <h2>Add fuel purchase</h2>
+  <p class="hint">One submission adds one row to the year log. Multiple purchases on the same day are fine.</p>
+
+  <form id="purchase-form">
+    <label for="date">Purchase date</label>
+    <input type="date" id="date" required>
+
+    <label for="purchaser">Purchaser</label>
+    <select id="purchaser" required></select>
+
+    <label for="carNumber">Car Number</label>
+    <input type="text" id="carNumber" maxlength="20" autocomplete="off"
+           autocapitalize="characters" spellcheck="false"
+           placeholder="e.g. GT 1234-24" required>
+
+    <label for="amount">Amount (GH₵)</label>
+    <input type="number" id="amount" min="0" step="0.01" inputmode="decimal" required>
+
+    <button type="submit" id="save">Add purchase</button>
+  </form>
+
+  <div id="status"></div>
+
+  <p class="note">Every entry is stamped with your Google account and time, and written to the Audit Log.
+    Car Number is required. To correct an existing purchase, edit its row in the log; the change is audited.</p>
+
+  <script>
+    var form = document.getElementById('purchase-form');
+    var dateInput = document.getElementById('date');
+    var purchaserInput = document.getElementById('purchaser');
+    var carInput = document.getElementById('carNumber');
+    var amountInput = document.getElementById('amount');
+    var saveButton = document.getElementById('save');
+    var statusBox = document.getElementById('status');
+
+    function setStatus(kind, message) {
+      statusBox.className = kind || '';
+      statusBox.textContent = message || '';
+    }
+
+    function setBusy(busy) {
+      saveButton.disabled = busy;
+      saveButton.textContent = busy ? 'Saving…' : 'Add purchase';
+    }
+
+    function init(data) {
+      if (!data) {
+        setStatus('err', 'Could not load Settings.');
+        saveButton.disabled = true;
+        return;
+      }
+
+      if (data.years && data.years.length) {
+        dateInput.min = data.years[0] + '-01-01';
+        dateInput.max = data.years[data.years.length - 1] + '-12-31';
+      }
+      dateInput.value = data.today || '';
+
+      var purchasers = data.purchasers || [];
+      purchaserInput.innerHTML = '';
+      if (!purchasers.length) {
+        var empty = document.createElement('option');
+        empty.value = '';
+        empty.textContent = 'Add names in Settings first';
+        purchaserInput.appendChild(empty);
+        purchaserInput.disabled = true;
+        saveButton.disabled = true;
+        setStatus('err', 'No purchaser names are listed in Settings.');
+        return;
+      }
+
+      for (var i = 0; i < purchasers.length; i++) {
+        var option = document.createElement('option');
+        option.value = purchasers[i];
+        option.textContent = purchasers[i];
+        purchaserInput.appendChild(option);
+      }
+      carInput.focus();
+    }
+
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      setStatus('', '');
+      setBusy(true);
+
+      var payload = {
+        date: dateInput.value,
+        purchaser: purchaserInput.value,
+        carNumber: carInput.value,
+        amount: amountInput.value
+      };
+
+      google.script.run
+        .withSuccessHandler(function (result) {
+          setBusy(false);
+          if (result && result.ok) {
+            setStatus('ok', result.message);
+            carInput.value = '';
+            amountInput.value = '';
+            carInput.focus();
+          } else {
+            setStatus('err', (result && result.message) || 'Could not save this purchase.');
+          }
+        })
+        .withFailureHandler(function (error) {
+          setBusy(false);
+          setStatus('err', error && error.message ? error.message : 'Could not save this purchase.');
+        })
+        .appendPurchase(payload);
+    });
+
+    google.script.run.withSuccessHandler(init).withFailureHandler(function (error) {
+      setStatus('err', 'Could not load the sidebar: ' + (error && error.message ? error.message : error));
+      saveButton.disabled = true;
+    }).getSidebarData();
+  </script>
+</body>
+</html>
