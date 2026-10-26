@@ -1322,7 +1322,44 @@ def build_settings(ws, years):
         c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
         c.protection = LOCKED
 
-    ws.print_area = "A1:B68"
+    ws.row_dimensions[69].height = 12
+    ws.row_dimensions[70].height = 24
+    merge_after_styling(
+        ws, "A70:B70",
+        value="WEEKLY REPORT",
+        font=Font(name=FONT, size=9, bold=True, color="8A6D3B"),
+        fill_color=CREAM,
+        alignment=Alignment(horizontal="left", vertical="center", indent=1),
+        border=Border(bottom=THIN),
+    )
+    ws.row_dimensions[71].height = 24
+    for col, value, font, locked in (
+        (1, "Recipients", Font(name=FONT, size=9.5, bold=True, color=INK), True),
+        (2, "", Font(name=FONT, size=9.5, color=INK), False),
+    ):
+        c = ws.cell(row=71, column=col, value=value)
+        c.font = font
+        c.fill = fill("FFFFFF")
+        c.border = ALL_BORDERS
+        c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        c.protection = LOCKED if locked else UNLOCKED
+    ws.row_dimensions[72].height = 22
+    for col, value in ((1, "Last sent"), (2, "")):
+        c = ws.cell(row=72, column=col, value=value)
+        c.font = Font(name=FONT, size=9, color=GREY)
+        c.fill = fill("FBF9F2")
+        c.border = ALL_BORDERS
+        c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        c.protection = LOCKED
+    ws.row_dimensions[73].height = 30
+    merge_after_styling(
+        ws, "A73:B73",
+        value="Comma-separated recipient emails. Manual sends can override this list.",
+        font=Font(name=FONT, size=8, italic=True, color=GREY),
+        alignment=Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1),
+    )
+
+    ws.print_area = "A1:B73"
     ws.page_setup.orientation = "portrait"
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
     ws.page_setup.fitToWidth = 1

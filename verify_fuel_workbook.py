@@ -308,12 +308,15 @@ for row in (15, 64):
     check(settings.cell(row=row, column=1).protection.locked is False,
           f"Settings A{row} should be editable")
 check(settings.protection.sheet is True, "Settings not protected")
-check(settings.print_area == "'Settings'!$A$1:$B$68",
+check(settings.print_area == "'Settings'!$A$1:$B$73",
       f"Settings print {settings.print_area}")
 check(settings.cell(row=67, column=1).value == "Mobile form link", "Settings form link label")
 check(settings.cell(row=68, column=1).value == "Owner account", "Settings owner label")
 check(settings.cell(row=68, column=2).value == "Set by administrator",
       "Settings owner placeholder")
+check(settings.cell(row=70, column=1).value == "WEEKLY REPORT", "Settings weekly band")
+check(settings.cell(row=71, column=1).value == "Recipients", "Settings recipients label")
+check(settings.cell(row=72, column=1).value == "Last sent", "Settings last sent label")
 
 # ---------------------------------------------------------------- formulas
 formula_cells = 0

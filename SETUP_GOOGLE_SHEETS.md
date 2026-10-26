@@ -126,13 +126,38 @@ A successful “Purchase added” message therefore means both records exist. Di
 corrections to log rows A–E are audited by `auditOnEdit`; the original Entered by/at
 is not overwritten. Pasting several cells logs one row per changed field.
 
-## 7. Protection
+## 7. Weekly report and email
+
+The **Fuel Log** menu includes:
+
+- **Weekly report** — prompts for a week start and creates/refreshes the
+  `Weekly Report` tab.
+- **Email weekly report** — generates the report and emails it.
+- **Set weekly report recipients** — saves approved addresses.
+
+The report covers Monday–Sunday, all purchasers, with detail rows, total, purchaser
+subtotals and car subtotals. A week crossing New Year is read from both year logs.
+No workbook re-import is required; the script creates the report tab and the Settings
+section on first use.
+
+Recipients are stored in **Settings → B71** (comma-separated). Manual sends can
+override the saved list. **Settings → B72** records the last successful send.
+
+The email contains the formatted HTML breakdown and a PDF attachment when Google can
+generate it. Recipients are BCC’d; the sender receives a copy. MailApp requires a
+one-time authorization and is subject to the sender’s daily email quota. Sending is
+manual; no scheduled trigger is installed.
+
+The report reads the live `YYYY Log` at run time, so it includes every purchase
+currently in the selected week, including entries added after the last export.
+
+## 8. Protection
 
 Google Sheets does not import the Excel protection. Set it there:
 
 1. **Data → Protect sheets and ranges**.
-2. Protect all **summaries** and **Settings** (leave Settings `A15:B64` editable
-   for the administrator).
+2. Protect all **summaries** and **Settings** (leave Settings `A15:B64` and the
+   weekly-recipient cell `B71` editable for the administrator).
 3. Protect the **Audit Log** using **Show a warning**, not **Restrict who can edit**.
    The sidebar runs as the signed-in user and must be able to append its audit row.
 4. Leave the year **Logs** editable for sidebar writes and corrections.
@@ -141,7 +166,7 @@ Google Sheets does not import the Excel protection. Set it there:
 If you need a truly locked Audit Log, use a Form with an owner-run web app rather
 than the user-run sidebar.
 
-## 8. Test before real data
+## 9. Test before real data
 
 1. Add two purchaser names in **Settings → A15:A16**.
 2. Run **setupMobileForm**, then open **Settings → B67** and confirm the Form link.
@@ -156,9 +181,13 @@ than the user-run sidebar.
    no purchase row appears.
 7. Edit a log amount; confirm the Audit Log records old/new and F–G stay unchanged.
 8. Clear purchaser and amount; confirm F–G clear and **Cleared** is logged.
-9. Delete test rows and audit rows before real use.
+9. Run **Fuel Log → Weekly report** for the week containing the test entries.
+   Confirm the detail, total, purchaser and car subtotals.
+10. Set **Settings → B71** to your own email, run **Email weekly report**, and
+    confirm the HTML body and PDF attachment arrive.
+11. Delete test rows and audit rows before real use.
 
-## 9. Remote access
+## 10. Remote access
 
 - **Owner/admin:** sign in to the designated owner account; open the Sheet or Form from
   Google Drive / `forms.google.com`; use the Settings hyperlink or Fuel Log menu.
@@ -168,7 +197,7 @@ than the user-run sidebar.
   submission, though field officers also have Editor access as requested.
 - Custom sidebars are desktop-web only; the Form is the mobile route.
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 **No Fuel Log menu** — reload; confirm the script is bound and `onOpen` exists.
 
@@ -201,6 +230,22 @@ the trigger writes valid submissions into the year log.
 Sheet; check Sheet sharing. Check the Audit Log for the rejection reason.
 
 **Form link missing** — run **setupMobileForm**, then use Fuel Log → Mobile form link.
+
+**Weekly report menu is missing** — replace `Code.gs` with the current version,
+save, and reload the Sheet.
+
+**Weekly report has no entries** — confirm the selected week starts on Monday and the
+purchases are in the matching `YYYY Log` dates. The report reads the live log.
+
+**Weekly email has no recipients** — set **Settings → B71**, or use
+**Fuel Log → Set weekly report recipients**. A manual send can still type addresses.
+
+**Weekly email fails** — approve MailApp authorization, check the sender’s daily
+email quota, and confirm addresses are valid. The report is still generated on the
+Sheet even if email fails.
+
+**No PDF attachment** — Google refused HTML-to-PDF conversion; the HTML report is
+still sent. Check the Apps Script execution log.
 
 **Purchase saved but audit error** — audit-first save should prevent this; check
 protection and the Apps Script execution log.

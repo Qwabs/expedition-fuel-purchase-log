@@ -37,6 +37,10 @@ var Q_PURCHASER = 'Purchaser';
 var Q_CAR = 'Car Number';
 var Q_AMOUNT = 'Amount (GH₵)';
 
+var REPORT_SHEET = 'Weekly Report';
+var REPORT_RECIPIENTS_CELL = 'B71';
+var REPORT_LAST_SENT_CELL = 'B72';
+
 
 function alert_(message) {
   try {
@@ -56,6 +60,10 @@ function onOpen() {
     .addItem('Mobile form link', 'showMobileFormLink')
     .addItem('Create / refresh mobile form', 'setupMobileForm')
     .addItem('Sync mobile form purchasers', 'syncMobileFormPurchasers')
+    .addSeparator()
+    .addItem('Weekly report', 'showWeeklyReport')
+    .addItem('Email weekly report', 'emailWeeklyReport')
+    .addItem('Set weekly report recipients', 'setWeeklyReportRecipients')
     .addSeparator()
     .addItem('Open Audit Log', 'openAuditLog')
     .addItem('Install audit trigger', 'setupAudit')
@@ -826,4 +834,597 @@ function openAuditLog() {
   var ss = SpreadsheetApp.getActive();
   var sheet = ensureAuditSheet_(ss);
   ss.setActiveSheet(sheet);
+}
+
+// ---------------------------------------------------------------- weekly report
+function showWeeklyReport() {
+  var ss = SpreadsheetApp.getActive();
+  ensureWeeklyReportSettings_(ss);
+  var weekStart = promptWeekStart_();
+  if (!weekStart) return;
+
+  var data = buildWeeklyReportData_(weekStart, ss);
+  refreshWeeklyReport_(data);
+  ss.setActiveSheet(ss.getSheetByName(REPORT_SHEET));
+}
+
+
+function emailWeeklyReport() {
+  var ss = SpreadsheetApp.getActive();
+  ensureWeeklyReportSettings_(ss);
+
+  var weekStart = promptWeekStart_();
+  if (!weekStart) return;
+
+  var data = buildWeeklyReportData_(weekStart, ss);
+  refreshWeeklyReport_(data);
+
+  var saved = getWeeklyRecipients_(ss);
+  var prompt = 'Recipients (comma-separated). Leave blank to use the saved list.';
+  if (saved.length) {
+    prompt += '\n\nSaved: ' + saved.join(', ');
+  }
+  var response = SpreadsheetApp.getUi().prompt(
+    'Email weekly report', prompt, SpreadsheetApp.getUi().ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== SpreadsheetApp.getUi().Button.OK) return;
+
+  var entered = String(response.getResponseText() || '').trim();
+  var recipients = entered ? parseRecipients_(entered) : { valid: saved, invalid: [] };
+  if (!recipients.valid.length) {
+    alert_('Enter at least one valid recipient email address.');
+    return;
+  }
+  if (recipients.invalid.length) {
+    alert_('These addresses are invalid:\n' + recipients.invalid.join('\n'));
+    return;
+  }
+
+  var subject = 'Fuel Purchase Weekly Report — ' + weekRangeLabel_(data);
+  var confirm = SpreadsheetApp.getUi().alert(
+    'Send weekly report?',
+    subject + '\n\nTo: ' + recipients.valid.join(', ') +
+    '\nPurchases: ' + data.count + '\nTotal: ' + formatMoney_(data.total),
+    SpreadsheetApp.getUi().ButtonSet.YES_NO
+  );
+  if (confirm !== SpreadsheetApp.getUi().Button.YES) return;
+
+  var pdf = buildWeeklyReportPdf_(data);
+  sendWeeklyReportEmail_(data, recipients.valid, pdf);
+  writeLastSent_(ss);
+  ss.setActiveSheet(ss.getSheetByName(REPORT_SHEET));
+
+  alert_(
+    'Weekly report emailed to:\n' + recipients.valid.join('\n') +
+    (pdf ? '\n\nPDF attached.' : '\n\nPDF generation was unavailable; the HTML report was sent.')
+  );
+}
+
+
+function setWeeklyReportRecipients() {
+  var ss = SpreadsheetApp.getActive();
+  ensureWeeklyReportSettings_(ss);
+  var saved = getWeeklyRecipients_(ss);
+  var response = SpreadsheetApp.getUi().prompt(
+    'Weekly report recipients',
+    'Enter one or more email addresses, comma-separated.' +
+    (saved.length ? '\n\nCurrent: ' + saved.join(', ') : ''),
+    SpreadsheetApp.getUi().ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== SpreadsheetApp.getUi().Button.OK) return;
+
+  var parsed = parseRecipients_(response.getResponseText());
+  if (parsed.invalid.length) {
+    alert_('These addresses are invalid:\n' + parsed.invalid.join('\n'));
+    return;
+  }
+  saveWeeklyRecipients_(ss, parsed.valid);
+  alert_(parsed.valid.length ? 'Weekly report recipients saved.' : 'Recipient list cleared.');
+}
+
+
+function promptWeekStart_() {
+  var ss = SpreadsheetApp.getActive();
+  var currentMonday = normalizeMonday_(new Date());
+  var defaultWeek = addDays_(currentMonday, -7);
+  var defaultText = formatDate_(defaultWeek, 'yyyy-MM-dd');
+  var response = SpreadsheetApp.getUi().prompt(
+    'Weekly report',
+    'Week starting date (yyyy-mm-dd). Leave blank for ' + defaultText + '.',
+    SpreadsheetApp.getUi().ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== SpreadsheetApp.getUi().Button.OK) return null;
+
+  var text = String(response.getResponseText() || '').trim();
+  var date = text ? parseDate_(text) : defaultWeek;
+  if (!date) {
+    alert_('Enter a valid date in the format yyyy-mm-dd.');
+    return null;
+  }
+  return normalizeMonday_(date);
+}
+
+
+function buildWeeklyReportData_(weekStart, ss) {
+  var start = dateOnly_(normalizeMonday_(weekStart));
+  var end = dateOnly_(addDays_(start, 6));
+  var entries = [];
+  var years = [start.getFullYear(), end.getFullYear()];
+  if (years[0] === years[1]) years.pop();
+
+  for (var y = 0; y < years.length; y++) {
+    var log = ss.getSheetByName(years[y] + ' Log');
+    if (!log) continue;
+    var values = log.getRange(ENTRY_FIRST_ROW, 1, LOG_ROWS, 7).getValues();
+    for (var i = 0; i < values.length; i++) {
+      var rawDate = values[i][COL_DATE - 1];
+      if (!(rawDate instanceof Date)) continue;
+      var day = dateOnly_(rawDate);
+      if (day < start || day > end) continue;
+
+      entries.push({
+        date: day,
+        purchaser: String(values[i][COL_PURCHASER - 1] || '').trim() || '(blank)',
+        amount: isFinite(Number(values[i][COL_AMOUNT - 1]))
+          ? Number(values[i][COL_AMOUNT - 1]) : 0,
+        car: normalizeCar_(values[i][COL_CAR - 1]) || '(missing)',
+        enteredBy: String(values[i][COL_ENTERED_BY - 1] || '').trim(),
+        enteredAt: values[i][COL_ENTERED_AT - 1] instanceof Date
+          ? values[i][COL_ENTERED_AT - 1] : null
+      });
+    }
+  }
+
+  entries.sort(function (a, b) {
+    var delta = a.date.getTime() - b.date.getTime();
+    if (delta) return delta;
+    var aTime = a.enteredAt ? a.enteredAt.getTime() : 0;
+    var bTime = b.enteredAt ? b.enteredAt.getTime() : 0;
+    return aTime - bTime;
+  });
+
+  var total = 0;
+  var count = 0;
+  for (var e = 0; e < entries.length; e++) {
+    total += entries[e].amount;
+    if (entries[e].amount > 0) count++;
+  }
+
+  return {
+    weekStart: start,
+    weekEnd: end,
+    entries: entries,
+    total: total,
+    count: count,
+    average: count ? total / count : 0,
+    byPurchaser: summarizeReport_(entries, 'purchaser'),
+    byCar: summarizeReport_(entries, 'car')
+  };
+}
+
+
+function summarizeReport_(entries, key) {
+  var map = {};
+  for (var i = 0; i < entries.length; i++) {
+    var name = entries[i][key];
+    if (!map[name]) map[name] = { name: name, count: 0, total: 0 };
+    map[name].count += entries[i].amount > 0 ? 1 : 0;
+    map[name].total += entries[i].amount;
+  }
+  var out = [];
+  for (var k in map) if (Object.prototype.hasOwnProperty.call(map, k)) out.push(map[k]);
+  out.sort(function (a, b) {
+    if (b.total !== a.total) return b.total - a.total;
+    return a.name.localeCompare(b.name);
+  });
+  return out;
+}
+
+
+function refreshWeeklyReport_(data) {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName(REPORT_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(REPORT_SHEET, 1);
+  } else {
+    sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).breakApart();
+    sheet.clear();
+  }
+
+  try { sheet.setHiddenGridlines(true); } catch (err) {}
+  try { sheet.setTabColor('#B08D57'); } catch (err) {}
+  try { sheet.setFrozenRows(7); } catch (err) {}
+
+  var widths = [13, 12, 24, 22, 16, 30];
+  for (var c = 0; c < widths.length; c++) sheet.setColumnWidth(c + 1, widths[c] * 8);
+
+  var title = sheet.getRange(1, 1, 1, 6);
+  title.merge();
+  title.setValue('WEEKLY FUEL REPORT · ' + weekRangeLabel_(data))
+    .setBackground('#1E4D3D').setFontColor('#FFFFFF')
+    .setFontSize(16).setFontWeight('bold')
+    .setHorizontalAlignment('left').setVerticalAlignment('middle');
+  sheet.setRowHeight(1, 32);
+
+  var subtitle = sheet.getRange(2, 1, 1, 6);
+  subtitle.merge();
+  subtitle.setValue('Monday–Sunday · Generated from the live purchase logs')
+    .setFontColor('#6B7280').setFontStyle('italic').setFontSize(9);
+  sheet.setRowHeight(2, 20);
+
+  sheet.getRange('A3:B3').setValues([['Week starting', data.weekStart]]);
+  sheet.getRange('A4:B4').setValues([['Week ending', data.weekEnd]]);
+  sheet.getRange('A5:B5').setValues([['Generated', new Date()]]);
+  sheet.getRange('B3:B4').setNumberFormat('dd mmm yyyy');
+  sheet.getRange('B5').setNumberFormat('dd mmm yyyy hh:mm');
+  sheet.getRange('A3:A5').setFontWeight('bold').setFontColor('#1E4D3D');
+  sheet.getRange('A3:B5').setBackground('#FBF7EC');
+  sheet.getRange('A3:B5').setBorder(true, true, true, true, true, true,
+                                    '#D6DDD8', SpreadsheetApp.BorderStyle.SOLID);
+
+  var band = sheet.getRange(6, 1, 1, 6);
+  band.merge();
+  band.setValue('ENTRIES').setBackground('#1E4D3D').setFontColor('#FFFFFF')
+    .setFontWeight('bold').setHorizontalAlignment('left')
+    .setVerticalAlignment('middle');
+  sheet.setRowHeight(6, 24);
+
+  var headers = ['Date', 'Day', 'Purchaser', 'Car Number', 'Amount (GH₵)', 'Entered by'];
+  var headerRange = sheet.getRange(7, 1, 1, 6);
+  headerRange.setValues([headers]).setBackground('#EFE4CF')
+    .setFontColor('#6B4F2A').setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, true, true, '#D6DDD8',
+                SpreadsheetApp.BorderStyle.SOLID);
+  sheet.setRowHeight(7, 24);
+
+  var row = 8;
+  for (var i = 0; i < data.entries.length; i++) {
+    var entry = data.entries[i];
+    var values = [[
+      entry.date, reportDay_(entry.date), entry.purchaser, entry.car,
+      entry.amount, entry.enteredBy
+    ]];
+    var range = sheet.getRange(row, 1, 1, 6);
+    range.setValues(values)
+      .setFontSize(10)
+      .setBackground(i % 2 === 0 ? '#FFFFFF' : '#FBF9F2')
+      .setVerticalAlignment('middle')
+      .setBorder(true, true, true, true, true, true, '#D6DDD8',
+                  SpreadsheetApp.BorderStyle.SOLID);
+    sheet.getRange(row, 1).setNumberFormat('dd mmm yyyy');
+    sheet.getRange(row, 5).setNumberFormat('"GH₵"#,##0.00');
+    sheet.getRange(row, 5).setHorizontalAlignment('right');
+    sheet.getRange(row, 2).setHorizontalAlignment('center');
+    sheet.setRowHeight(row, 20);
+    row++;
+  }
+
+  if (!data.entries.length) {
+    var empty = sheet.getRange(8, 1, 1, 6);
+    empty.merge();
+    empty.setValue('No purchases recorded for this week.')
+      .setFontColor('#6B7280').setFontStyle('italic')
+      .setHorizontalAlignment('center').setVerticalAlignment('middle')
+      .setBackground('#FBF7EC');
+    sheet.setRowHeight(8, 26);
+    row = 9;
+  }
+
+  row += 1;
+  sheet.getRange(row, 1).setValue('Purchases').setFontWeight('bold');
+  sheet.getRange(row, 2).setValue(data.count).setHorizontalAlignment('center');
+  sheet.getRange(row, 4).setValue('Total').setFontWeight('bold');
+  sheet.getRange(row, 5).setValue(data.total).setNumberFormat('"GH₵"#,##0.00')
+    .setHorizontalAlignment('right');
+  sheet.getRange(row, 1, 1, 5).setBackground('#FBF7EC')
+    .setBorder(true, true, true, true, true, true, '#D6DDD8',
+                SpreadsheetApp.BorderStyle.SOLID);
+  row++;
+  sheet.getRange(row, 1).setValue('Average').setFontWeight('bold');
+  sheet.getRange(row, 2).setValue(data.average).setNumberFormat('"GH₵"#,##0.00')
+    .setHorizontalAlignment('center');
+  sheet.getRange(row, 1, 1, 5).setBackground('#FBF7EC')
+    .setBorder(true, true, true, true, true, true, '#D6DDD8',
+                SpreadsheetApp.BorderStyle.SOLID);
+
+  row += 3;
+  var purchaserBand = sheet.getRange(row, 1, 1, 6);
+  purchaserBand.merge();
+  purchaserBand.setValue('BY PURCHASER')
+    .setBackground('#1E4D3D').setFontColor('#FFFFFF')
+    .setFontWeight('bold').setHorizontalAlignment('left');
+  sheet.setRowHeight(row, 22);
+  row++;
+  sheet.getRange(row, 1, 1, 3).setValues([['Purchaser', 'Purchases', 'Total']])
+    .setBackground('#EFE4CF').setFontColor('#6B4F2A').setFontWeight('bold')
+    .setHorizontalAlignment('center');
+  row++;
+  for (var p = 0; p < data.byPurchaser.length; p++) {
+    var item = data.byPurchaser[p];
+    sheet.getRange(row, 1, 1, 3).setValues([[item.name, item.count, item.total]])
+      .setBackground(p % 2 === 0 ? '#FFFFFF' : '#FBF9F2')
+      .setBorder(true, true, true, true, true, true, '#D6DDD8',
+                  SpreadsheetApp.BorderStyle.SOLID);
+    sheet.getRange(row, 3).setNumberFormat('"GH₵"#,##0.00')
+      .setHorizontalAlignment('right');
+    sheet.getRange(row, 2).setHorizontalAlignment('center');
+    row++;
+  }
+  if (!data.byPurchaser.length) {
+    sheet.getRange(row, 1).setValue('No entries').setFontColor('#6B7280');
+    row++;
+  }
+
+  row += 2;
+  var carBand = sheet.getRange(row, 1, 1, 6);
+  carBand.merge();
+  carBand.setValue('BY CAR')
+    .setBackground('#1E4D3D').setFontColor('#FFFFFF')
+    .setFontWeight('bold').setHorizontalAlignment('left');
+  sheet.setRowHeight(row, 22);
+  row++;
+  sheet.getRange(row, 1, 1, 3).setValues([['Car Number', 'Purchases', 'Total']])
+    .setBackground('#EFE4CF').setFontColor('#6B4F2A').setFontWeight('bold')
+    .setHorizontalAlignment('center');
+  row++;
+  for (var c2 = 0; c2 < data.byCar.length; c2++) {
+    var carItem = data.byCar[c2];
+    sheet.getRange(row, 1, 1, 3).setValues([[carItem.name, carItem.count, carItem.total]])
+      .setBackground(c2 % 2 === 0 ? '#FFFFFF' : '#FBF9F2')
+      .setBorder(true, true, true, true, true, true, '#D6DDD8',
+                  SpreadsheetApp.BorderStyle.SOLID);
+    sheet.getRange(row, 3).setNumberFormat('"GH₵"#,##0.00')
+      .setHorizontalAlignment('right');
+    sheet.getRange(row, 2).setHorizontalAlignment('center');
+    row++;
+  }
+  if (!data.byCar.length) {
+    sheet.getRange(row, 1).setValue('No entries').setFontColor('#6B7280');
+    row++;
+  }
+
+  row += 2;
+  var footer = sheet.getRange(row, 1, 1, 6);
+  footer.merge();
+  footer.setValue('Generated from live purchase logs. Use Fuel Log → Weekly report to refresh.')
+    .setFontSize(8).setFontStyle('italic').setFontColor('#6B7280');
+  sheet.setRowHeight(row, 20);
+
+  try { sheet.setPageOrientation('landscape'); } catch (err) {}
+  try { sheet.setFrozenRows(7); } catch (err) {}
+  try { sheet.autoResizeColumn(1); } catch (err) {}
+  sheet.getRange(1, 1, row, 6).setFontFamily('Arial');
+}
+
+
+function buildWeeklyReportPdf_(data) {
+  try {
+    var html = buildWeeklyReportHtml_(data);
+    var blob = Utilities.newBlob(html, MimeType.HTML, 'weekly-report.html');
+    var pdf = blob.getAs(MimeType.PDF);
+    pdf.setName('Fuel-Weekly-Report-' + formatDate_(data.weekStart, 'yyyy-MM-dd') + '.pdf');
+    return pdf;
+  } catch (err) {
+    console.log('Weekly PDF generation failed: ' + err);
+    return null;
+  }
+}
+
+
+function sendWeeklyReportEmail_(data, recipients, pdf) {
+  var sender = Session.getActiveUser().getEmail();
+  var bcc = [];
+  for (var i = 0; i < recipients.length; i++) {
+    if (!sender || recipients[i].toLowerCase() !== sender.toLowerCase()) bcc.push(recipients[i]);
+  }
+
+  var params = {
+    subject: 'Fuel Purchase Weekly Report — ' + weekRangeLabel_(data),
+    htmlBody: buildWeeklyReportHtml_(data),
+    name: 'Fuel Purchase Log'
+  };
+  if (sender) {
+    params.to = sender;
+    params.replyTo = sender;
+    if (bcc.length) params.bcc = bcc.join(',');
+  } else {
+    params.to = recipients[0];
+    if (recipients.length > 1) params.bcc = recipients.slice(1).join(',');
+  }
+  if (pdf) params.attachments = [pdf];
+  MailApp.sendEmail(params);
+}
+
+
+function buildWeeklyReportHtml_(data) {
+  var html = [];
+  html.push('<div style="font-family:Arial,Helvetica,sans-serif;color:#374151;max-width:900px">');
+  html.push('<h1 style="color:#1E4D3D;font-size:20px;margin:0 0 4px">FUEL PURCHASE WEEKLY REPORT</h1>');
+  html.push('<p style="color:#6B7280;font-size:12px;margin:0 0 18px">' +
+            escapeHtml_(weekRangeLabel_(data)) + ' · Ghana Cedi (GH₵)</p>');
+
+  html.push('<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px">');
+  html.push('<tr><td style="background:#FBF7EC;padding:8px;border:1px solid #D6DDD8"><b>Purchases</b></td>' +
+            '<td style="padding:8px;border:1px solid #D6DDD8" align="right">' + data.count + '</td>' +
+            '<td style="background:#FBF7EC;padding:8px;border:1px solid #D6DDD8"><b>Total</b></td>' +
+            '<td style="padding:8px;border:1px solid #D6DDD8" align="right">' + formatMoney_(data.total) + '</td>' +
+            '<td style="background:#FBF7EC;padding:8px;border:1px solid #D6DDD8"><b>Average</b></td>' +
+            '<td style="padding:8px;border:1px solid #D6DDD8" align="right">' + formatMoney_(data.average) + '</td></tr>');
+  html.push('</table>');
+
+  html.push('<h2 style="color:#1E4D3D;font-size:14px;margin:18px 0 6px">Entries</h2>');
+  html.push('<table style="width:100%;border-collapse:collapse;font-size:11px">');
+  html.push('<thead><tr>' +
+            '<th style="background:#1E4D3D;color:#fff;padding:6px;text-align:left">Date</th>' +
+            '<th style="background:#1E4D3D;color:#fff;padding:6px;text-align:left">Purchaser</th>' +
+            '<th style="background:#1E4D3D;color:#fff;padding:6px;text-align:left">Car Number</th>' +
+            '<th style="background:#1E4D3D;color:#fff;padding:6px;text-align:right">Amount</th>' +
+            '<th style="background:#1E4D3D;color:#fff;padding:6px;text-align:left">Entered by</th>' +
+            '</tr></thead><tbody>');
+  if (!data.entries.length) {
+    html.push('<tr><td colspan="5" style="padding:10px;text-align:center;color:#6B7280">No purchases recorded for this week.</td></tr>');
+  } else {
+    for (var i = 0; i < data.entries.length; i++) {
+      var e = data.entries[i];
+      html.push('<tr style="background:' + (i % 2 === 0 ? '#FFFFFF' : '#FBF9F2') + '">' +
+                '<td style="padding:6px;border-bottom:1px solid #E5E7EB">' + formatDate_(e.date, 'dd MMM yyyy') + '</td>' +
+                '<td style="padding:6px;border-bottom:1px solid #E5E7EB">' + escapeHtml_(e.purchaser) + '</td>' +
+                '<td style="padding:6px;border-bottom:1px solid #E5E7EB">' + escapeHtml_(e.car) + '</td>' +
+                '<td style="padding:6px;border-bottom:1px solid #E5E7EB;text-align:right">' + formatMoney_(e.amount) + '</td>' +
+                '<td style="padding:6px;border-bottom:1px solid #E5E7EB">' + escapeHtml_(e.enteredBy) + '</td>' +
+                '</tr>');
+    }
+  }
+  html.push('</tbody></table>');
+
+  html.push(reportSummaryTable_('By Purchaser', data.byPurchaser, 'Purchaser'));
+  html.push(reportSummaryTable_('By Car', data.byCar, 'Car Number'));
+  html.push('<p style="color:#6B7280;font-size:10px;margin-top:18px">Generated from the live purchase logs. ' +
+            'Currency: Ghana Cedi (GH₵).</p>');
+  html.push('</div>');
+  return html.join('');
+}
+
+
+function reportSummaryTable_(title, items, label) {
+  var html = [];
+  html.push('<h2 style="color:#1E4D3D;font-size:14px;margin:18px 0 6px">' +
+            escapeHtml_(title) + '</h2>');
+  html.push('<table style="width:100%;border-collapse:collapse;font-size:11px">');
+  html.push('<thead><tr><th style="background:#EFE4CF;color:#6B4F2A;padding:6px;text-align:left">' +
+            escapeHtml_(label) + '</th><th style="background:#EFE4CF;color:#6B4F2A;padding:6px">Purchases</th>' +
+            '<th style="background:#EFE4CF;color:#6B4F2A;padding:6px;text-align:right">Total</th></tr></thead><tbody>');
+  if (!items.length) {
+    html.push('<tr><td colspan="3" style="padding:8px;color:#6B7280">No entries</td></tr>');
+  } else {
+    for (var i = 0; i < items.length; i++) {
+      html.push('<tr><td style="padding:5px;border-bottom:1px solid #E5E7EB">' +
+                escapeHtml_(items[i].name) + '</td><td style="padding:5px;border-bottom:1px solid #E5E7EB;text-align:center">' +
+                items[i].count + '</td><td style="padding:5px;border-bottom:1px solid #E5E7EB;text-align:right">' +
+                formatMoney_(items[i].total) + '</td></tr>');
+    }
+  }
+  html.push('</tbody></table>');
+  return html.join('');
+}
+
+
+function ensureWeeklyReportSettings_(ss) {
+  try {
+    var sheet = ss.getSheetByName('Settings');
+    if (!sheet) return;
+    if (isBlank_(sheet.getRange('A70').getValue())) {
+      sheet.getRange('A70').setValue('WEEKLY REPORT')
+        .setBackground('#FBF7EC').setFontWeight('bold').setFontColor('#8A6D3B');
+      sheet.getRange('A71').setValue('Recipients').setFontWeight('bold');
+      sheet.getRange('A72').setValue('Last sent').setFontWeight('bold');
+      sheet.getRange('A73').setValue('Comma-separated emails. Manual sends can override.')
+        .setFontSize(8).setFontStyle('italic').setFontColor('#6B7280');
+      sheet.getRange('A70:B70').setBorder(false, false, true, false, false, false,
+                                            '#D6DDD8', SpreadsheetApp.BorderStyle.SOLID);
+    }
+  } catch (err) {
+    console.log('Weekly settings setup skipped: ' + err);
+  }
+}
+
+
+function getWeeklyRecipients_(ss) {
+  var sheet = ss.getSheetByName('Settings');
+  if (!sheet) return [];
+  return parseRecipients_(sheet.getRange(REPORT_RECIPIENTS_CELL).getValue()).valid;
+}
+
+
+function saveWeeklyRecipients_(ss, recipients) {
+  var sheet = ss.getSheetByName('Settings');
+  if (!sheet) return;
+  sheet.getRange(REPORT_RECIPIENTS_CELL).setValue(recipients.join(', '));
+}
+
+
+function writeLastSent_(ss) {
+  try {
+    var sheet = ss.getSheetByName('Settings');
+    if (!sheet) return;
+    sheet.getRange(REPORT_LAST_SENT_CELL)
+      .setValue(new Date())
+      .setNumberFormat('dd mmm yyyy hh:mm');
+  } catch (err) {
+    console.log('Could not write last-sent time: ' + err);
+  }
+}
+
+
+function parseRecipients_(raw) {
+  var parts = String(raw === null || raw === undefined ? '' : raw)
+    .split(/[\s,;]+/)
+    .filter(function (value) { return value !== ''; });
+  var valid = [];
+  var invalid = [];
+  var seen = {};
+  for (var i = 0; i < parts.length; i++) {
+    var email = parts[i];
+    var key = email.toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      invalid.push(email);
+    } else if (!seen[key]) {
+      seen[key] = true;
+      valid.push(email);
+    }
+  }
+  return { valid: valid, invalid: invalid };
+}
+
+
+function normalizeMonday_(date) {
+  var d = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12, 0, 0);
+  var offset = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - offset);
+  return d;
+}
+
+
+function addDays_(date, days) {
+  var d = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12, 0, 0);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+
+function dateOnly_(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+
+function formatDate_(date, pattern) {
+  return Utilities.formatDate(date, SpreadsheetApp.getActive().getSpreadsheetTimeZone(), pattern);
+}
+
+
+function reportDay_(date) {
+  return formatDate_(date, 'EEEE');
+}
+
+
+function weekRangeLabel_(data) {
+  var start = formatDate_(data.weekStart, 'd MMM');
+  var end = formatDate_(data.weekEnd, 'd MMM yyyy');
+  return start + ' – ' + end;
+}
+
+
+function formatMoney_(value) {
+  var number = isFinite(Number(value)) ? Number(value) : 0;
+  return 'GH₵' + number.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+
+function escapeHtml_(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
