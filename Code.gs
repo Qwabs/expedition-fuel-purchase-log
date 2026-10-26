@@ -84,7 +84,7 @@ function getSidebarData() {
   return {
     purchasers: getPurchasers_(ss),
     years: getLogYears_(ss),
-    today: Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd')
+    today: formatDate_(new Date(), 'yyyy-MM-dd')
   };
 }
 
@@ -441,7 +441,7 @@ function isBlank_(value) {
 function stringify_(value) {
   if (value === null || value === undefined) return '';
   if (value instanceof Date) {
-    return Utilities.formatDate(value, Session.getScriptTimeZone(),
+    return Utilities.formatDate(value, timeZone_(),
                                 'yyyy-MM-dd HH:mm:ss');
   }
   return String(value);
@@ -1398,8 +1398,30 @@ function dateOnly_(date) {
 }
 
 
+function timeZone_() {
+  var tz = '';
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (ss) tz = ss.getSpreadsheetTimeZone();
+  } catch (err) {
+    // fall through to script timezone
+  }
+  if (typeof tz !== 'string' || tz.trim() === '') {
+    try {
+      tz = Session.getScriptTimeZone();
+    } catch (err2) {
+      tz = '';
+    }
+  }
+  if (typeof tz !== 'string' || tz.trim() === '') {
+    tz = 'Africa/Accra';
+  }
+  return tz;
+}
+
+
 function formatDate_(date, pattern) {
-  return Utilities.formatDate(date, SpreadsheetApp.getActive().getSpreadsheetTimeZone(), pattern);
+  return Utilities.formatDate(date, timeZone_(), pattern);
 }
 
 

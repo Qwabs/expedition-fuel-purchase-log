@@ -234,6 +234,10 @@ Sheet; check Sheet sharing. Check the Audit Log for the rejection reason.
 **Weekly report menu is missing** — replace `Code.gs` with the current version,
 save, and reload the Sheet.
 
+**Weekly report reports a timeZone error** — replace `Code.gs` with the current
+version; it falls back from the spreadsheet timezone to the script timezone. You can
+also set **File → Settings → Time zone** to **GMT / Africa/Accra**.
+
 **Weekly report has no entries** — confirm the selected week starts on Monday and the
 purchases are in the matching `YYYY Log` dates. The report reads the live log.
 
