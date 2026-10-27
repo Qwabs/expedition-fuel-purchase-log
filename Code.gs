@@ -897,7 +897,7 @@ function showLogHealth() {
   var issueOrder = [
     'Row gap', 'Hidden rows', 'Possible duplicate', 'Missing date',
     'Invalid date', 'Missing car number', 'Missing purchaser',
-    'Missing amount', 'Date outside log year'
+    'Purchaser not in Settings', 'Missing amount', 'Date outside log year'
   ];
   var counts = {};
   for (var i = 0; i < findings.length; i++) {
@@ -964,6 +964,11 @@ function showLogHealth() {
 function scanLogHealth_(ss) {
   var findings = [];
   var sheets = ss.getSheets();
+  var purchaserList = getPurchasers_(ss);
+  var purchaserLookup = {};
+  for (var p = 0; p < purchaserList.length; p++) {
+    purchaserLookup[purchaserList[p]] = true;
+  }
 
   for (var s = 0; s < sheets.length; s++) {
     var sheet = sheets[s];
@@ -1054,6 +1059,26 @@ function scanLogHealth_(ss) {
           issue: 'Missing purchaser',
           detail: 'The purchase has no purchaser.'
         });
+      } else if (purchaserList.length) {
+        var rawPurchaser = String(purchaser);
+        var purchaserName = rawPurchaser.trim();
+        if (purchaserName && purchaserLookup[purchaserName] !== true) {
+          findings.push({
+            sheet: sheet.getName(),
+            rows: String(row),
+            issue: 'Purchaser not in Settings',
+            detail: 'Add "' + purchaserName + '" to Settings!A15:A64 so ' +
+              'the dropdown, reports and Form include it.'
+          });
+        } else if (rawPurchaser !== purchaserName) {
+          findings.push({
+            sheet: sheet.getName(),
+            rows: String(row),
+            issue: 'Purchaser not in Settings',
+            detail: 'The purchaser name has leading or trailing spaces; ' +
+              'trim it to match Settings.'
+          });
+        }
       }
       if (isBlank_(amount) || !isFinite(Number(amount)) || Number(amount) === 0) {
         findings.push({

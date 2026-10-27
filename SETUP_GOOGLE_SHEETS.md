@@ -183,6 +183,8 @@ It reports:
   row-hiding setting, with the number of purchase rows not visible. This is the
   first thing to check when a log appears to have lost entries.
 - **Possible duplicates** — rows with the same date, purchaser, amount and car number.
+- **Purchaser not in Settings** — a name that will trigger the C-column validation
+  warning and appear as unlisted in reports. Add the exact name to Settings.
 - **Missing date**, **invalid date**, **missing purchaser**, **missing amount** and
   **missing car number**.
 - **Dates outside the log year**.
@@ -265,6 +267,11 @@ version, save, and reload the Sheet.
 Use **Data → Turn off filter**, close any active filter view, or select the row numbers
 and choose **Unhide rows**. `COUNTA` including the hidden rows is the quick proof
 that the purchases still exist; `SUBTOTAL(103, …)` counts only visible rows.
+
+**The purchaser cell says “Input must fall within specified range”** — the name is
+not in `Settings!A15:A64`. Copy the exact purchaser name, remove leading/trailing
+spaces, and add it to the first blank row of the Settings list. Run **Fuel Log →
+Sync mobile form purchasers** afterwards. Do not remove the validation rule.
 
 **Audit logs reports a row gap** — do not delete or re-import the workbook. Check
 **File → Version history** and copy the missing rows into the current log. A gap is
