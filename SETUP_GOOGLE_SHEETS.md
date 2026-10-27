@@ -47,8 +47,11 @@ The Sheet, Form, script and triggers must be owned by the designated owner Googl
 4. Create an HTML file: **+ → HTML**, name it exactly **Sidebar**, paste
    `Sidebar.html`.
 5. Save the project as “Fuel Log”.
-6. Run **setupAudit** once and approve the authorization prompts.
+6. Run **setupAudit** once and approve the authorization prompts. It installs both the edit and change triggers.
 7. Run **setupMobileForm** once and approve any additional Form/Drive prompts.
+
+If you are upgrading an existing Sheet, replace `Code.gs` and run `setupAudit` again.
+That installs the new `auditOnChange` trigger without changing any log rows.
 
 Reload the Sheet. The **Fuel Log** menu should offer:
 
@@ -57,11 +60,13 @@ Reload the Sheet. The **Fuel Log** menu should offer:
 - **Mobile form link** — shows the responder URL and refreshes the Settings link.
 - **Create / refresh mobile form**
 - **Sync mobile form purchasers**
+- **Audit logs** — read-only health scan of every `YYYY Log`.
 - **Open Audit Log**
 - **Install audit trigger**
 
 The edit trigger is `auditOnEdit`, not `onEdit`, so it cannot run twice as a simple
-and installable trigger. The Form trigger is `processFormResponse`.
+and installable trigger. `setupAudit` also installs the `auditOnChange` trigger for
+row/column insert and delete events. The Form trigger is `processFormResponse`.
 
 ## 4. The mobile Form
 
@@ -166,7 +171,49 @@ Google Sheets does not import the Excel protection. Set it there:
 If you need a truly locked Audit Log, use a Form with an owner-run web app rather
 than the user-run sidebar.
 
-## 9. Test before real data
+## 9. Log health and structural audit
+
+Run **Fuel Log → Audit logs** at any time. This is a read-only scan of every
+`YYYY Log`; it does not edit cells, rows or history.
+
+It reports:
+
+- **Row gaps** — blank rows between the first and last purchase.
+- **Hidden rows** — rows hidden by a filter, a collapsed row group or the
+  row-hiding setting, with the number of purchase rows not visible. This is the
+  first thing to check when a log appears to have lost entries.
+- **Possible duplicates** — rows with the same date, purchaser, amount and car number.
+- **Missing date**, **invalid date**, **missing purchaser**, **missing amount** and
+  **missing car number**.
+- **Dates outside the log year**.
+
+Results appear in a modal with row numbers. Correct the findings in the log, then run
+the check again. The scan never repairs data automatically.
+
+Filter views are personal; a normal filter hides rows for everyone. Use **Filter
+views** when browsing a log, or turn the filter off before handing the Sheet to
+another editor.
+
+### Structural changes
+
+`setupAudit` installs two installable triggers:
+
+- `auditOnEdit` records changes to the purchase fields in the year logs.
+- `auditOnChange` records `INSERT_ROW`, `REMOVE_ROW`, `INSERT_COLUMN` and
+  `REMOVE_COLUMN` events in the Audit Log.
+
+Google's change event identifies the event type, time and editor, but not the sheet
+or row that changed. A structure-change audit row therefore uses `Workbook` as the
+sheet and leaves the purchase fields blank. It proves that a row was inserted or
+deleted; it cannot reconstruct the deleted values. Use **File → Version history** to
+recover those rows, and copy only the missing rows into the current log rather than
+restoring the entire workbook.
+
+Keep the year logs editable for the sidebar and Form. Do not rely on sheet
+protection alone to prevent row deletion; the edit and change audit plus version
+history are the recovery path.
+
+## 10. Test before real data
 
 1. Add two purchaser names in **Settings → A15:A16**.
 2. Run **setupMobileForm**, then open **Settings → B67** and confirm the Form link.
@@ -185,9 +232,14 @@ than the user-run sidebar.
    Confirm the detail, total, purchaser and car subtotals.
 10. Set **Settings → B71** to your own email, run **Email weekly report**, and
     confirm the HTML body and PDF attachment arrive.
-11. Delete test rows and audit rows before real use.
+11. Run **Fuel Log → Audit logs**; confirm it reports no gaps, hidden rows,
+    duplicates or missing fields.
+12. Insert and delete a test row; confirm the Audit Log now contains a
+    **Structure change** row for `INSERT_ROW` and `REMOVE_ROW`, then delete the
+    test audit rows.
+13. Delete the remaining test log rows and audit rows before real use.
 
-## 10. Remote access
+## 11. Remote access
 
 - **Owner/admin:** sign in to the designated owner account; open the Sheet or Form from
   Google Drive / `forms.google.com`; use the Settings hyperlink or Fuel Log menu.
@@ -197,14 +249,32 @@ than the user-run sidebar.
   submission, though field officers also have Editor access as requested.
 - Custom sidebars are desktop-web only; the Form is the mobile route.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **No Fuel Log menu** — reload; confirm the script is bound and `onOpen` exists.
 
 **Sidebar says “Could not load”** — check the HTML file name is exactly `Sidebar`.
 
-**No Audit Log rows** — check the installable trigger for `auditOnEdit`; rerun
-`setupAudit`.
+**No Audit Log rows** — check the installable triggers for `auditOnEdit` and
+`auditOnChange`; rerun `setupAudit`.
+
+**Audit logs is not in the Fuel Log menu** — replace `Code.gs` with the current
+version, save, and reload the Sheet.
+
+**Audit logs reports hidden rows** — a filter or filter view is hiding the rows.
+Use **Data → Turn off filter**, close any active filter view, or select the row numbers
+and choose **Unhide rows**. `COUNTA` including the hidden rows is the quick proof
+that the purchases still exist; `SUBTOTAL(103, …)` counts only visible rows.
+
+**Audit logs reports a row gap** — do not delete or re-import the workbook. Check
+**File → Version history** and copy the missing rows into the current log. A gap is
+blank row space, not evidence that the purchases were deleted.
+
+**No Structure change audit rows after inserting or deleting a row** — confirm
+`setupAudit` was run after the current `Code.gs` was installed. Only row/column
+inserts and deletes are logged; filters, hiding rows and formatting are not
+structural changes. Google does not provide the affected sheet or row in the change
+event, so the audit row cannot include the deleted purchase values.
 
 **Mobile Form has no purchaser choices** — add names in Settings, then run
 **Sync mobile form purchasers**.

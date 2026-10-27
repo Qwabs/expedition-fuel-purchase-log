@@ -23,6 +23,9 @@ var COL_ENTERED_AT = 7;  // G
 var AUDIT_HEADER_ROW = 4;
 var AUDIT_WIDTH = 12;
 var ENTRY_COLUMNS = [COL_DATE, COL_PURCHASER, COL_AMOUNT, COL_CAR];
+var STRUCTURAL_CHANGE_TYPES = [
+  'INSERT_ROW', 'REMOVE_ROW', 'INSERT_COLUMN', 'REMOVE_COLUMN'
+];
 var FIELD_NAMES = {
   1: 'Date',
   3: 'Purchaser',
@@ -65,6 +68,7 @@ function onOpen() {
     .addItem('Email weekly report', 'emailWeeklyReport')
     .addItem('Set weekly report recipients', 'setWeeklyReportRecipients')
     .addSeparator()
+    .addItem('Audit logs', 'showLogHealth')
     .addItem('Open Audit Log', 'openAuditLog')
     .addItem('Install audit trigger', 'setupAudit')
     .addToUi();
@@ -275,6 +279,42 @@ function auditOnEdit(e) {
     if (auditRows.length) {
       appendAuditRows_(audit, auditRows);
     }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+function auditOnChange(e) {
+  if (!e || !e.changeType) return;
+  if (STRUCTURAL_CHANGE_TYPES.indexOf(e.changeType) === -1) return;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return;
+
+  try {
+    var ss = e.source || SpreadsheetApp.getActive();
+    if (!ss) return;
+
+    // The change event exposes the change type and user, but not the affected
+    // sheet or row. Version history is still required to recover row contents.
+    var audit = ensureAuditSheet_(ss);
+    appendAuditRows_(audit, [[
+      new Date(),
+      getEditorEmail_(e),
+      'Workbook',
+      '',
+      '',
+      '',
+      '',
+      '',
+      e.changeType,
+      '',
+      '',
+      'Structure change'
+    ]]);
+  } catch (err) {
+    console.log('auditOnChange failed: ' + err.message);
   } finally {
     lock.releaseLock();
   }
@@ -817,15 +857,17 @@ function setupAudit() {
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     var handler = triggers[i].getHandlerFunction();
-    if (handler === 'onEdit' || handler === 'auditOnEdit') {
+    if (handler === 'onEdit' || handler === 'auditOnEdit' ||
+        handler === 'auditOnChange') {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
   ScriptApp.newTrigger('auditOnEdit').forSpreadsheet(ss).onEdit().create();
+  ScriptApp.newTrigger('auditOnChange').forSpreadsheet(ss).onChange().create();
 
   alert_(
-    'Audit trigger installed.\n\nUse Fuel Log > Add Purchase or the mobile Form. ' +
-    'Every change is written to the Audit Log.'
+    'Audit triggers installed.\n\nUse Fuel Log > Add Purchase or the mobile Form. ' +
+    'Cell edits and row/column structure changes are written to the Audit Log.'
   );
 }
 
@@ -834,6 +876,338 @@ function openAuditLog() {
   var ss = SpreadsheetApp.getActive();
   var sheet = ensureAuditSheet_(ss);
   ss.setActiveSheet(sheet);
+}
+
+
+// --------------------------------------------------------------- log health
+function showLogHealth() {
+  var ss = SpreadsheetApp.getActive();
+  var findings = scanLogHealth_(ss);
+  var ui = SpreadsheetApp.getUi();
+
+  if (!findings.length) {
+    ui.alert(
+      'Log health check',
+      'No gaps, hidden rows, possible duplicates or missing fields were found in the year logs.',
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+
+  var issueOrder = [
+    'Row gap', 'Hidden rows', 'Possible duplicate', 'Missing date',
+    'Invalid date', 'Missing car number', 'Missing purchaser',
+    'Missing amount', 'Date outside log year'
+  ];
+  var counts = {};
+  for (var i = 0; i < findings.length; i++) {
+    counts[findings[i].issue] = (counts[findings[i].issue] || 0) + 1;
+  }
+
+  var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
+    'body{font-family:Arial,Helvetica,sans-serif;color:#20342b;margin:14px;}' +
+    'h2{margin:0 0 4px;color:#1E4D3D;font-size:20px;}' +
+    '.muted{color:#62746b;font-size:12px;margin:0 0 14px;}' +
+    '.summary{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px;}' +
+    '.pill{border:1px solid #cfded6;background:#f3f8f5;border-radius:14px;' +
+    'padding:5px 10px;font-size:12px;}' +
+    '.pill strong{color:#1E4D3D;}' +
+    'table{border-collapse:collapse;width:100%;font-size:12px;}' +
+    'th{position:sticky;top:0;background:#1E4D3D;color:#fff;text-align:left;' +
+    'padding:7px 8px;}' +
+    'td{border-bottom:1px solid #e1e9e4;padding:7px 8px;vertical-align:top;}' +
+    'tr:nth-child(even) td{background:#f8fbf9;}' +
+    '.sheet{white-space:nowrap;font-weight:bold;}' +
+    '.rows{white-space:nowrap;}' +
+    '.issue{white-space:nowrap;color:#8a3b12;font-weight:bold;}' +
+    '.note{margin-top:10px;color:#62746b;font-size:12px;}' +
+    '</style></head><body>';
+  html += '<h2>Log health check</h2>';
+  html += '<p class="muted">Read-only scan · ' +
+    escapeHtml_(formatDate_(new Date(), 'd MMM yyyy HH:mm')) + '</p>';
+  html += '<div class="summary">';
+  for (var j = 0; j < issueOrder.length; j++) {
+    var issue = issueOrder[j];
+    if (counts[issue]) {
+      html += '<span class="pill">' + escapeHtml_(issue) + ': <strong>' +
+        counts[issue] + '</strong></span>';
+    }
+  }
+  html += '</div>';
+
+  var limit = 300;
+  html += '<table><thead><tr><th>Sheet</th><th>Rows</th><th>Issue</th>' +
+    '<th>Details</th></tr></thead><tbody>';
+  for (var k = 0; k < findings.length && k < limit; k++) {
+    var finding = findings[k];
+    html += '<tr><td class="sheet">' + escapeHtml_(finding.sheet) +
+      '</td><td class="rows">' + escapeHtml_(finding.rows) +
+      '</td><td class="issue">' + escapeHtml_(finding.issue) +
+      '</td><td>' + escapeHtml_(finding.detail) + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  if (findings.length > limit) {
+    html += '<p class="note">Showing the first ' + limit + ' of ' +
+      findings.length + ' findings. Fix these and run the check again.</p>';
+  }
+  html += '<p class="note">This check never edits the workbook. ' +
+    'Use File → Version history to recover deleted rows.</p>';
+  html += '</body></html>';
+
+  ui.showModalDialog(
+    HtmlService.createHtmlOutput(html).setWidth(960).setHeight(680),
+    'Log health check'
+  );
+}
+
+
+function scanLogHealth_(ss) {
+  var findings = [];
+  var sheets = ss.getSheets();
+
+  for (var s = 0; s < sheets.length; s++) {
+    var sheet = sheets[s];
+    var match = sheet.getName().match(/^(\d{4}) Log$/);
+    if (!match) continue;
+
+    var year = Number(match[1]);
+    var height = Math.min(LOG_ROWS, sheet.getMaxRows() - ENTRY_FIRST_ROW + 1);
+    if (height <= 0) continue;
+
+    var values = sheet.getRange(
+      ENTRY_FIRST_ROW, COL_DATE, height, COL_ENTERED_AT
+    ).getValues();
+    var firstRow = -1;
+    var lastRow = -1;
+    var row;
+
+    for (var i = 0; i < values.length; i++) {
+      if (healthRowHasData_(values[i])) {
+        if (firstRow === -1) firstRow = ENTRY_FIRST_ROW + i;
+        lastRow = ENTRY_FIRST_ROW + i;
+      }
+    }
+    if (firstRow === -1) continue;
+
+    // Gaps and field checks within the populated part of the log.
+    var gapStart = -1;
+    var duplicateRows = {};
+
+    for (row = firstRow; row <= lastRow; row++) {
+      var rowValues = values[row - ENTRY_FIRST_ROW];
+      if (!healthRowHasData_(rowValues)) {
+        if (gapStart === -1) gapStart = row;
+        continue;
+      }
+      if (gapStart !== -1) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: gapStart + '–' + (row - 1),
+          issue: 'Row gap',
+          detail: 'No purchase data between the rows above and below.'
+        });
+        gapStart = -1;
+      }
+
+      var date = rowValues[COL_DATE - 1];
+      var purchaser = rowValues[COL_PURCHASER - 1];
+      var amount = rowValues[COL_AMOUNT - 1];
+      var car = rowValues[COL_CAR - 1];
+      var hasCore = !isBlank_(purchaser) || !isBlank_(amount) || !isBlank_(car);
+
+      if (isBlank_(date)) {
+        if (hasCore) {
+          findings.push({
+            sheet: sheet.getName(),
+            rows: String(row),
+            issue: 'Missing date',
+            detail: 'Purchaser, amount or car number is present without a purchase date.'
+          });
+        }
+        continue;
+      }
+
+      if (!(date instanceof Date)) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: String(row),
+          issue: 'Invalid date',
+          detail: 'The purchase date is not a valid date value.'
+        });
+        continue;
+      }
+
+      if (date.getFullYear() !== year) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: String(row),
+          issue: 'Date outside log year',
+          detail: 'The date is ' + formatDate_(date, 'd MMM yyyy') +
+            ', not in ' + year + '.'
+        });
+      }
+
+      if (isBlank_(purchaser)) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: String(row),
+          issue: 'Missing purchaser',
+          detail: 'The purchase has no purchaser.'
+        });
+      }
+      if (isBlank_(amount) || !isFinite(Number(amount)) || Number(amount) === 0) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: String(row),
+          issue: 'Missing amount',
+          detail: 'The purchase has no valid amount.'
+        });
+      }
+      if (isBlank_(car)) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: String(row),
+          issue: 'Missing car number',
+          detail: 'The purchase has no car number.'
+        });
+      }
+
+      if (!isBlank_(purchaser) && !isBlank_(amount) && !isBlank_(car)) {
+        var key = formatDate_(date, 'yyyy-MM-dd') + '|' +
+          String(purchaser).trim().toUpperCase() + '|' +
+          Number(amount).toFixed(2) + '|' + normalizeCar_(car);
+        if (!duplicateRows[key]) duplicateRows[key] = [];
+        duplicateRows[key].push(row);
+      }
+    }
+
+    if (gapStart !== -1) {
+      findings.push({
+        sheet: sheet.getName(),
+        rows: gapStart + '–' + lastRow,
+        issue: 'Row gap',
+        detail: 'No purchase data before the last populated row.'
+      });
+    }
+
+    // Hidden rows are the easiest way for purchases to look missing while
+    // remaining present. Report them separately from blank gaps.
+    var hiddenStart = -1;
+    var hiddenEnd = -1;
+    var hiddenKind = '';
+
+    for (row = firstRow; row <= lastRow; row++) {
+      // Only populated rows can represent missing purchases. Skipping blank
+      // rows also keeps the hidden-row check inexpensive on a large log.
+      if (!healthRowHasData_(values[row - ENTRY_FIRST_ROW])) {
+        if (hiddenStart !== -1) {
+          addHiddenFinding_(findings, sheet, values, firstRow,
+                            hiddenStart, hiddenEnd, hiddenKind);
+          hiddenStart = -1;
+        }
+        continue;
+      }
+
+      var kind = '';
+      try {
+        if (sheet.isRowHiddenByFilter(row)) {
+          kind = 'filter';
+        }
+      } catch (errFilter) {
+        // Older or unusual sheet objects may not expose this method.
+      }
+      if (!kind) {
+        try {
+          if (sheet.isRowHiddenByUser(row)) kind = 'user';
+        } catch (errUser) {
+          // Fall through with no hidden state.
+        }
+      }
+      if (!kind && typeof sheet.getRowGroup === 'function') {
+        for (var depth = 1; depth <= 8; depth++) {
+          try {
+            var group = sheet.getRowGroup(row, depth);
+            if (group && group.isCollapsed()) {
+              kind = 'group';
+              break;
+            }
+          } catch (errGroup) {
+            // No row group at this depth.
+          }
+        }
+      }
+
+      if (kind) {
+        if (hiddenStart !== -1 &&
+            (hiddenKind !== kind || row !== hiddenEnd + 1)) {
+          addHiddenFinding_(findings, sheet, values, firstRow,
+                            hiddenStart, hiddenEnd, hiddenKind);
+          hiddenStart = -1;
+        }
+        if (hiddenStart === -1) {
+          hiddenStart = row;
+          hiddenKind = kind;
+        }
+        hiddenEnd = row;
+      } else if (hiddenStart !== -1) {
+        addHiddenFinding_(findings, sheet, values, firstRow,
+                          hiddenStart, hiddenEnd, hiddenKind);
+        hiddenStart = -1;
+      }
+    }
+    if (hiddenStart !== -1) {
+      addHiddenFinding_(findings, sheet, values, firstRow,
+                        hiddenStart, hiddenEnd, hiddenKind);
+    }
+
+    for (var key in duplicateRows) {
+      if (!duplicateRows.hasOwnProperty(key)) continue;
+      var rows = duplicateRows[key];
+      if (rows.length > 1) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: rows.join(', '),
+          issue: 'Possible duplicate',
+          detail: 'Same date, purchaser, amount and car number on ' +
+            rows.length + ' rows. Confirm this is not a double entry.'
+        });
+      }
+    }
+  }
+
+  findings.sort(function (a, b) {
+    if (a.sheet !== b.sheet) return a.sheet < b.sheet ? -1 : 1;
+    var aRow = parseInt(String(a.rows), 10) || 0;
+    var bRow = parseInt(String(b.rows), 10) || 0;
+    return aRow - bRow;
+  });
+  return findings;
+}
+
+
+function healthRowHasData_(rowValues) {
+  return !isBlank_(rowValues[COL_DATE - 1]) ||
+    !isBlank_(rowValues[COL_PURCHASER - 1]) ||
+    !isBlank_(rowValues[COL_AMOUNT - 1]) ||
+    !isBlank_(rowValues[COL_CAR - 1]);
+}
+
+
+function addHiddenFinding_(findings, sheet, values, firstRow,
+                           start, end, kind) {
+  var entries = 0;
+  for (var row = start; row <= end; row++) {
+    if (healthRowHasData_(values[row - firstRow])) entries++;
+  }
+  var how = kind === 'filter' ? 'a filter' :
+    (kind === 'group' ? 'a collapsed row group' : 'a hidden-row setting');
+  findings.push({
+    sheet: sheet.getName(),
+    rows: start + '–' + end,
+    issue: 'Hidden rows',
+    detail: 'Rows are hidden by ' + how + '; ' + entries +
+      ' purchase row(s) are not visible.'
+  });
 }
 
 // ---------------------------------------------------------------- weekly report
