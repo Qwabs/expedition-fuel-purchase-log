@@ -51,12 +51,19 @@ The Sheet, Form, script and triggers must be owned by the designated owner Googl
 7. Run **setupMobileForm** once and approve any additional Form/Drive prompts.
 
 If you are upgrading an existing Sheet, replace `Code.gs` and run `setupAudit` again.
-That installs the new `auditOnChange` trigger without changing any log rows.
+That installs the new `auditOnChange` trigger without changing any log rows. After
+upgrading, run **Fuel Log → Fill Day column** once, then **Fuel Log → Sort all year
+logs by date** once. The first repairs existing Day cells; the second puts existing
+purchases in date order.
 
 Reload the Sheet. The **Fuel Log** menu should offer:
 
 - **Add Purchase** — desktop sidebar.
 - **Open current year log**
+- **Sort log by date** — sorts the active `YYYY Log` (or the current year log) into
+  ascending date order.
+- **Sort all year logs by date** — sorts every `YYYY Log` in the workbook.
+- **Fill Day column** — fills the Day formula in `B5:B5004` of every `YYYY Log`.
 - **Mobile form link** — shows the responder URL and refreshes the Settings link.
 - **Create / refresh mobile form**
 - **Sync mobile form purchasers**
@@ -123,13 +130,16 @@ The sidebar and Form use one audit-first function:
 1. Acquire the script lock.
 2. Find the next log row.
 3. Append the Audit Log entry.
-4. Write the purchase row and F–G stamps.
+4. Write the purchase row, Day formula and F–G stamps.
 5. If the purchase write fails, remove the audit row and return an error.
-6. Flush only when both succeed.
+6. Move the purchase into its chronological slot if it is back-dated. The Audit
+   Log row number is updated to the final position.
+7. Flush only when both succeed.
 
 A successful “Purchase added” message therefore means both records exist. Direct
 corrections to log rows A–E are audited by `auditOnEdit`; the original Entered by/at
-is not overwritten. Pasting several cells logs one row per changed field.
+is not overwritten. Pasting several cells logs one row per changed field. A date
+correction on a complete purchase row is sorted into date order automatically.
 
 ## 7. Weekly report and email
 
@@ -187,10 +197,47 @@ It reports:
   warning and appear as unlisted in reports. Add the exact name to Settings.
 - **Missing date**, **invalid date**, **missing purchaser**, **missing amount** and
   **missing car number**.
+- **Missing day** or **Day mismatch** — the Day column is blank or does not match
+  the purchase date.
 - **Dates outside the log year**.
+- **Dates out of order** — a purchase date that is earlier than the date above it.
 
 Results appear in a modal with row numbers. Correct the findings in the log, then run
 the check again. The scan never repairs data automatically.
+
+### Date order
+
+The year logs are kept in ascending date order, oldest at the top. The sidebar and
+mobile Form sort a back-dated purchase into place immediately. A manual date
+correction on a complete purchase row is sorted as well, once date, purchaser,
+amount and car number are all present. Same-day purchases keep their entry order.
+
+Run **Fuel Log → Sort log by date** to sort the active log, or **Fuel Log → Sort all
+year logs by date** to sort every `YYYY Log` in the workbook. The Audit Log is not
+reordered; it stays in timestamp order, and the monthly/summary sheets are
+formula-driven and already ordered. The sort commands do not insert or delete rows;
+they move purchase values within the existing 5,000-row block, so totals, summaries,
+validation and protection are unchanged. Blank gaps and rows with a missing or
+invalid date stay where they are and remain visible to **Audit logs**.
+
+Row numbers move when a log is sorted. The Audit Log records the row at the time of
+the action; older entries keep their original row number, while new entries and
+edits point to the final position.
+
+### Day column
+
+Column B is formula-driven:
+
+`=IF($A5="","",TEXT($A5,"dddd"))`
+
+The Day fills as soon as a date is entered in column A. The sidebar/Form set it for
+new rows, and a manual date edit repairs the edited row. If existing rows are blank
+or show the wrong day, run **Fuel Log → Fill Day column** once; it fills
+`B5:B5004` in every year log. Sorting also rebuilds the Day column so static day
+values cannot be left on the wrong rows.
+
+Do not type day names into column B. Keep it formula-driven so changing the date
+updates the day automatically.
 
 Filter views are personal; a normal filter hides rows for everyone. Use **Filter
 views** when browsing a log, or turn the filter off before handing the Sheet to
@@ -224,22 +271,31 @@ history are the recovery path.
    Audit Log shows **Added via sidebar**.
 4. Add a second purchase on the same date with a different purchaser. Confirm both
    appear and the weekly summary includes both.
-5. Submit the mobile Form from a second Google account that has Editor access.
+5. Type a date into a blank row's A cell. Confirm the Day column fills immediately.
+   Change the date and confirm the Day updates.
+6. Add a purchase dated earlier than the last entry. Confirm it is moved above the
+   later date, the purchase data moves with it, the Day follows the date, and the
+   Audit Log row number points to the final row.
+7. Edit a complete purchase row's date so it becomes out of order. Confirm the row
+   is sorted back into place and the Audit Log row number is updated.
+8. Run **Fuel Log → Fill Day column**; confirm every year log reports all Day
+   formulas present.
+9. Submit the mobile Form from a second Google account that has Editor access.
    Confirm the row, car number, email, timestamp and **Added via form** audit row.
-6. Submit the Form from an account without Sheet access; confirm it is rejected and
-   no purchase row appears.
-7. Edit a log amount; confirm the Audit Log records old/new and F–G stay unchanged.
-8. Clear purchaser and amount; confirm F–G clear and **Cleared** is logged.
-9. Run **Fuel Log → Weekly report** for the week containing the test entries.
-   Confirm the detail, total, purchaser and car subtotals.
-10. Set **Settings → B71** to your own email, run **Email weekly report**, and
+10. Submit the Form from an account without Sheet access; confirm it is rejected and
+    no purchase row appears.
+11. Edit a log amount; confirm the Audit Log records old/new and F–G stay unchanged.
+12. Clear purchaser and amount; confirm F–G clear and **Cleared** is logged.
+13. Run **Fuel Log → Weekly report** for the week containing the test entries.
+    Confirm the detail, total, purchaser and car subtotals.
+14. Set **Settings → B71** to your own email, run **Email weekly report**, and
     confirm the HTML body and PDF attachment arrive.
-11. Run **Fuel Log → Audit logs**; confirm it reports no gaps, hidden rows,
-    duplicates or missing fields.
-12. Insert and delete a test row; confirm the Audit Log now contains a
+15. Run **Fuel Log → Audit logs**; confirm it reports no gaps, hidden rows,
+    duplicates, missing fields, Day errors or dates out of order.
+16. Insert and delete a test row; confirm the Audit Log now contains a
     **Structure change** row for `INSERT_ROW` and `REMOVE_ROW`, then delete the
     test audit rows.
-13. Delete the remaining test log rows and audit rows before real use.
+17. Delete the remaining test log rows and audit rows before real use.
 
 ## 11. Remote access
 
@@ -276,6 +332,20 @@ Sync mobile form purchasers** afterwards. Do not remove the validation rule.
 **Audit logs reports a row gap** — do not delete or re-import the workbook. Check
 **File → Version history** and copy the missing rows into the current log. A gap is
 blank row space, not evidence that the purchases were deleted.
+
+**Audit logs reports dates out of order** — open the log and run **Fuel Log → Sort
+log by date**, or run **Fuel Log → Sort all year logs by date**. New sidebar/Form
+entries and manual date corrections on complete rows sort automatically; if they do
+not, replace `Code.gs` with the current version and reload the Sheet. Fix any
+**Invalid date** finding first, because text dates are left in place.
+
+**Day column is blank or shows the wrong day** — run **Fuel Log → Fill Day column**.
+It fills the standard Day formula in `B5:B5004` of every year log. If it reports a
+permission error, allow editors to write column B or run the command as the owner.
+Confirm the date in column A is a real date, not text; **Audit logs** reports text
+dates as **Invalid date**. Dates outside the 5,000-row log block need the log
+extended rather than another formula. If a manual date edit still does not fill the
+Day, run `setupAudit` so the `auditOnEdit` trigger is installed.
 
 **No Structure change audit rows after inserting or deleting a row** — confirm
 `setupAudit` was run after the current `Code.gs` was installed. Only row/column

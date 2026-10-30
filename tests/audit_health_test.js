@@ -2,8 +2,16 @@ const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
 
+const DAY_NAMES = [
+  'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
+];
+
 function pad(value) {
   return String(value).padStart(2, '0');
+}
+
+function mockDay(date) {
+  return date instanceof Date ? DAY_NAMES[date.getDay()] : '';
 }
 
 function mockFormatDate(date, timeZone, pattern) {
@@ -13,6 +21,9 @@ function mockFormatDate(date, timeZone, pattern) {
   }
   if (pattern === 'd MMM yyyy') {
     return date.getDate() + ' Jan ' + date.getFullYear();
+  }
+  if (pattern === 'EEEE') {
+    return mockDay(date);
   }
   return date.toString();
 }
@@ -103,18 +114,23 @@ function makeSettingsSheet(names) {
 }
 
 const logValues = [];
-function logRow(date, purchaser, amount, car) {
-  return [date, '', purchaser, amount, car, '', ''];
+function logRow(date, purchaser, amount, car, day) {
+  return [
+    date,
+    day === undefined ? mockDay(date) : day,
+    purchaser, amount, car, '', ''
+  ];
 }
 logValues[0] = logRow(new Date(2026, 0, 1), 'A', 100, 'CAR1');
 logValues[1] = logRow(new Date(2026, 0, 1), 'A', 100, 'CAR1');
 logValues[2] = logRow(new Date(2026, 0, 2), '', 50, 'CAR2');
+logValues[2][1] = '';
 logValues[3] = logRow(new Date(2026, 0, 3), 'B', 50, '');
 logValues[4] = logRow('', 'C', 30, 'CAR3');
 logValues[5] = logRow(new Date(2027, 0, 1), 'B', 20, 'CAR2');
 logValues[6] = ['', '', '', '', '', '', ''];
 logValues[7] = logRow(new Date(2026, 0, 4), 'D', 0, 'CAR4');
-logValues[8] = logRow(new Date(2026, 0, 6), 'E', 25, 'CAR5');
+logValues[8] = logRow(new Date(2026, 0, 6), 'E', 25, 'CAR5', 'Monday');
 while (logValues.length < 5000) {
   logValues.push(['', '', '', '', '', '', '']);
 }
@@ -192,8 +208,11 @@ assert.strictEqual(count('Missing car number'), 1, 'one missing car');
 assert.strictEqual(count('Missing purchaser'), 1, 'one missing purchaser');
 assert.strictEqual(count('Missing amount'), 1, 'one missing amount');
 assert.strictEqual(count('Date outside log year'), 1, 'one out-of-year date');
+assert.strictEqual(count('Dates out of order'), 1, 'one out-of-order date');
+assert.strictEqual(count('Missing day'), 1, 'one missing day');
+assert.strictEqual(count('Day mismatch'), 1, 'one wrong day');
 assert.strictEqual(count('Purchaser not in Settings'), 1, 'one unlisted purchaser');
-assert.strictEqual(findings.length, 10, 'total findings');
+assert.strictEqual(findings.length, 13, 'total findings');
 
 const unlisted = findings.filter(function (finding) {
   return finding.issue === 'Purchaser not in Settings';
@@ -205,6 +224,24 @@ const duplicate = findings.find(function (finding) {
   return finding.issue === 'Possible duplicate';
 });
 assert.strictEqual(duplicate.rows, '5, 6');
+
+const outOfOrder = findings.find(function (finding) {
+  return finding.issue === 'Dates out of order';
+});
+assert.strictEqual(outOfOrder.rows, '12');
+assert.ok(outOfOrder.detail.indexOf('row 10') !== -1);
+
+const missingDay = findings.find(function (finding) {
+  return finding.issue === 'Missing day';
+});
+assert.strictEqual(missingDay.rows, '7');
+
+const dayMismatch = findings.find(function (finding) {
+  return finding.issue === 'Day mismatch';
+});
+assert.strictEqual(dayMismatch.rows, '13');
+assert.ok(dayMismatch.detail.indexOf('Monday') !== -1);
+assert.ok(dayMismatch.detail.indexOf('Tuesday') !== -1);
 
 const hidden = findings.filter(function (finding) {
   return finding.issue === 'Hidden rows';

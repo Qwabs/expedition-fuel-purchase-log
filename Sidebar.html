@@ -50,7 +50,7 @@
 </head>
 <body>
   <h2>Add fuel purchase</h2>
-  <p class="hint">One submission adds one row to the year log. Multiple purchases on the same day are fine.</p>
+  <p class="hint">One submission adds one row to the year log in date order. Multiple purchases on the same day are fine.</p>
 
   <form id="purchase-form">
     <label for="date">Purchase date</label>
@@ -72,8 +72,8 @@
 
   <div id="status"></div>
 
-  <p class="note">Every entry is stamped with your Google account and time, and written to the Audit Log.
-    Car Number is required. To correct an existing purchase, edit its row in the log; the change is audited.</p>
+  <p class="note">Every entry is stamped with your Google account and time, written to the Audit Log,
+    placed in date order, and the Day column fills from the date. Car Number is required. To correct an existing purchase, edit its row in the log; the change is audited.</p>
 
   <script>
     var form = document.getElementById('purchase-form');

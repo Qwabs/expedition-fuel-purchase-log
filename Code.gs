@@ -1,5 +1,7 @@
 /**
  * Fuel Purchase Log — year logs, Add Purchase sidebar, mobile Form and audit.
+ * Purchases are kept in ascending date order; back-dated entries and date
+ * corrections are sorted automatically. The Day column is formula-driven.
  *
  * Install once after importing the workbook into Google Sheets:
  *   1. Extensions > Apps Script
@@ -59,6 +61,9 @@ function onOpen() {
     .createMenu('Fuel Log')
     .addItem('Add Purchase', 'showAddPurchase')
     .addItem('Open current year log', 'openCurrentLog')
+    .addItem('Sort log by date', 'sortCurrentLogByDate')
+    .addItem('Sort all year logs by date', 'sortAllLogsByDate')
+    .addItem('Fill Day column', 'fillAllDayColumns')
     .addSeparator()
     .addItem('Mobile form link', 'showMobileFormLink')
     .addItem('Create / refresh mobile form', 'setupMobileForm')
@@ -168,11 +173,7 @@ function appendPurchaseRecord_(ss, date, purchaser, amount, car, email, action, 
       log.getRange(row, COL_ENTERED_BY).setValue(email);
       log.getRange(row, COL_ENTERED_AT).setValue(enteredAt);
 
-      if (log.getRange(row, 2).getFormula() === '') {
-        log.getRange(row, 2).setFormula(
-          '=IF(A' + row + '="","",TEXT(A' + row + ',"dddd"))'
-        );
-      }
+      ensureDayFormula_(log, row);
       log.getRange(row, COL_DATE).setNumberFormat('dd mmm yyyy');
       log.getRange(row, COL_AMOUNT).setNumberFormat('"GH₵"#,##0.00');
       log.getRange(row, COL_ENTERED_AT).setNumberFormat('dd mmm yyyy hh:mm');
@@ -180,9 +181,7 @@ function appendPurchaseRecord_(ss, date, purchaser, amount, car, email, action, 
       var cleared = false;
       try {
         log.getRange(row, 1, 1, 7).clearContent();
-        log.getRange(row, 2).setFormula(
-          '=IF(A' + row + '="","",TEXT(A' + row + ',"dddd"))'
-        );
+        log.getRange(row, 2).setFormula(dayFormula_(row));
         cleared = true;
       } catch (clearErr) {
         // leave the audit row in place rather than an unlogged partial row
@@ -202,6 +201,28 @@ function appendPurchaseRecord_(ss, date, purchaser, amount, car, email, action, 
       throw new Error(
         writeErr.message + (cleared ? '' : ' (partial row retained with audit record)')
       );
+    }
+
+    // A back-dated purchase is appended first so the audit row exists, then
+    // moved into its chronological slot. The audit row keeps the final row.
+    try {
+      var sortResult = sortLogByDate_(log);
+      if (sortResult.rowMap && sortResult.rowMap[row] &&
+          sortResult.rowMap[row] !== row) {
+        var finalRow = sortResult.rowMap[row];
+        audit.getRange(auditStart, 4).setValue(finalRow);
+        row = finalRow;
+      }
+      if (sortResult.moved) {
+        try {
+          fillDayFormulas_(log);
+        } catch (dayErr) {
+          console.log('Day column rebuild after save failed: ' +
+                      (dayErr.message || dayErr));
+        }
+      }
+    } catch (sortErr) {
+      console.log('Date sort after save failed: ' + (sortErr.message || sortErr));
     }
 
     SpreadsheetApp.flush();
@@ -237,6 +258,8 @@ function auditOnEdit(e) {
     var singleCell = range.getNumCells() === 1;
     var oldValue = singleCell ? e.oldValue : '';
     var auditRows = [];
+    var affectedRows = [];
+    var affectedSeen = {};
 
     var firstRow = Math.max(range.getRow(), ENTRY_FIRST_ROW);
     var lastRow = Math.min(range.getLastRow(), LOG_LAST_ROW);
@@ -273,11 +296,47 @@ function auditOnEdit(e) {
 
       if (changed) {
         updateStamp_(sheet, row, email, now);
+        try {
+          ensureDayFormula_(sheet, row);
+        } catch (dayErr) {
+          console.log('Day formula update failed: ' + (dayErr.message || dayErr));
+        }
+        if (!affectedSeen[row]) {
+          affectedSeen[row] = true;
+          affectedRows.push(row);
+        }
       }
     }
 
+    var auditStart = null;
     if (auditRows.length) {
-      appendAuditRows_(audit, auditRows);
+      auditStart = appendAuditRows_(audit, auditRows);
+    }
+
+    // Date corrections can break chronological order. Sort only once the
+    // edited row is a complete purchase, so a new row does not jump while the
+    // user is still typing the remaining fields.
+    if (auditStart && shouldSortAfterEdit_(sheet, affectedRows)) {
+      try {
+        var sortResult = sortLogByDate_(sheet);
+        if (sortResult.moved) {
+          var mappedRows = [];
+          for (var a = 0; a < auditRows.length; a++) {
+            var oldRow = auditRows[a][3];
+            mappedRows.push([sortResult.rowMap[oldRow] || oldRow]);
+          }
+          audit.getRange(auditStart, 4, mappedRows.length, 1).setValues(mappedRows);
+          try {
+            fillDayFormulas_(sheet);
+          } catch (dayErr) {
+            console.log('Day column rebuild after edit failed: ' +
+                        (dayErr.message || dayErr));
+          }
+        }
+        SpreadsheetApp.flush();
+      } catch (sortErr) {
+        console.log('Date sort after edit failed: ' + (sortErr.message || sortErr));
+      }
     }
   } finally {
     lock.releaseLock();
@@ -338,9 +397,16 @@ function updateStamp_(sheet, row, email, now) {
 
 
 function findAppendRow_(log) {
-  var values = log.getRange(ENTRY_FIRST_ROW, COL_DATE, LOG_ROWS, 1).getValues();
+  var height = Math.min(LOG_ROWS, log.getMaxRows() - ENTRY_FIRST_ROW + 1);
+  if (height <= 0) return ENTRY_FIRST_ROW;
+
+  // Check every purchase column, not just the date. A row with a purchaser,
+  // amount or car number but no date must not be overwritten by the next save.
+  var values = log.getRange(ENTRY_FIRST_ROW, COL_DATE, height, COL_CAR).getValues();
   for (var i = values.length - 1; i >= 0; i--) {
-    if (!isBlank_(values[i][0])) {
+    var row = values[i];
+    if (!isBlank_(row[0]) || !isBlank_(row[2]) ||
+        !isBlank_(row[3]) || !isBlank_(row[4])) {
       var next = ENTRY_FIRST_ROW + i + 1;
       if (next > LOG_LAST_ROW) {
         throw new Error('The ' + log.getName() + ' is full (' + LOG_ROWS + ' purchases).');
@@ -349,6 +415,368 @@ function findAppendRow_(log) {
     }
   }
   return ENTRY_FIRST_ROW;
+}
+
+
+/**
+ * Reorders the populated purchases in a year log into ascending date order.
+ * Only dated rows are reordered. Blank gaps and rows with a missing or invalid
+ * date stay in their original positions. The locked Day formula column (B) is
+ * never written; it recalculates from column A. Returns a map of old row ->
+ * new row so callers can update their Audit Log row references.
+ */
+function sortLogByDate_(log) {
+  var height = Math.min(LOG_ROWS, log.getMaxRows() - ENTRY_FIRST_ROW + 1);
+  if (height <= 0) {
+    return { count: 0, moved: 0, rowMap: {} };
+  }
+
+  var dateValues = log.getRange(ENTRY_FIRST_ROW, COL_DATE, height, 1).getValues();
+  var slots = [];
+  var previousKey = null;
+  var sorted = true;
+
+  for (var i = 0; i < height; i++) {
+    var value = dateValues[i][0];
+    if (!isValidDate_(value)) continue;
+    slots.push(i);
+    var key = dayKey_(value);
+    if (previousKey !== null && key < previousKey) {
+      sorted = false;
+    }
+    previousKey = key;
+  }
+
+  var rowMap = {};
+  for (var s = 0; s < slots.length; s++) {
+    var slotRow = ENTRY_FIRST_ROW + slots[s];
+    rowMap[slotRow] = slotRow;
+  }
+
+  if (sorted) {
+    return { count: slots.length, moved: 0, rowMap: rowMap };
+  }
+
+  var dataWidth = COL_ENTERED_AT - COL_PURCHASER + 1;
+  var dataValues = log.getRange(
+    ENTRY_FIRST_ROW, COL_PURCHASER, height, dataWidth
+  ).getValues();
+
+  var entries = [];
+  for (var j = 0; j < slots.length; j++) {
+    entries.push({
+      slot: slots[j],
+      date: dateValues[slots[j]][0],
+      data: dataValues[slots[j]]
+    });
+  }
+
+  entries.sort(function (a, b) {
+    var delta = dayKey_(a.date) - dayKey_(b.date);
+    if (delta) return delta;
+    return a.slot - b.slot;  // same-day purchases keep their entry order
+  });
+
+  var outDates = [];
+  var outData = [];
+  for (var k = 0; k < height; k++) {
+    outDates.push([dateValues[k][0]]);
+    outData.push(dataValues[k]);
+  }
+
+  var moved = 0;
+  for (var m = 0; m < entries.length; m++) {
+    var targetSlot = slots[m];
+    var entry = entries[m];
+    outDates[targetSlot] = [entry.date];
+    outData[targetSlot] = entry.data;
+    var oldRow = ENTRY_FIRST_ROW + entry.slot;
+    var newRow = ENTRY_FIRST_ROW + targetSlot;
+    rowMap[oldRow] = newRow;
+    if (oldRow !== newRow) moved++;
+  }
+
+  log.getRange(ENTRY_FIRST_ROW, COL_DATE, height, 1).setValues(outDates);
+  log.getRange(ENTRY_FIRST_ROW, COL_PURCHASER, height, dataWidth).setValues(outData);
+
+  return { count: slots.length, moved: moved, rowMap: rowMap };
+}
+
+
+function dayFormula_(row) {
+  return '=IF($A' + row + '="","",TEXT($A' + row + ',"dddd"))';
+}
+
+
+function ensureDayFormula_(sheet, row) {
+  var formula = dayFormula_(row);
+  var cell = sheet.getRange(row, 2);
+  if (cell.getFormula() !== formula) {
+    cell.setFormula(formula);
+  }
+}
+
+
+/**
+ * Fills the Day formula in B5:B5004 of one year log. Existing static day
+ * values and missing formulas are replaced with the standard formula.
+ * Returns the number of cells that needed repair.
+ */
+function fillDayFormulas_(log) {
+  var height = Math.min(LOG_ROWS, log.getMaxRows() - ENTRY_FIRST_ROW + 1);
+  if (height <= 0) return 0;
+
+  var range = log.getRange(ENTRY_FIRST_ROW, 2, height, 1);
+  var current = range.getFormulas();
+  var expected = [];
+  var repaired = 0;
+
+  for (var i = 0; i < height; i++) {
+    var formula = dayFormula_(ENTRY_FIRST_ROW + i);
+    expected.push([formula]);
+    if (current[i][0] !== formula) repaired++;
+  }
+
+  if (repaired) range.setFormulas(expected);
+  return repaired;
+}
+
+
+function sortCurrentLogByDate() {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getActiveSheet();
+  if (!LOG_RE.test(sheet.getName())) {
+    sheet = ss.getSheetByName(new Date().getFullYear() + ' Log');
+  }
+  if (!sheet || !LOG_RE.test(sheet.getName())) {
+    alert_('Open a year log (for example 2026 Log), then run Sort log by date again.');
+    return;
+  }
+
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert(
+    'Sort ' + sheet.getName() + ' by date',
+    'Purchases will be placed in ascending date order. Row numbers will change. ' +
+    'Totals and summaries are not affected.\n\nContinue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    alert_('Another entry is saving. Please try again.');
+    return;
+  }
+
+  try {
+    var result = sortLogByDate_(sheet);
+    if (!result.count) {
+      alert_('No purchases with a valid date were found in ' + sheet.getName() + '.');
+      return;
+    }
+    if (!result.moved) {
+      alert_(sheet.getName() + ' is already in date order. No rows were moved.');
+      return;
+    }
+
+    var dayRepaired = 0;
+    var dayError = null;
+    try {
+      dayRepaired = fillDayFormulas_(sheet);
+    } catch (dayErr) {
+      dayError = dayErr.message || String(dayErr);
+    }
+
+    appendAuditRows_(ensureAuditSheet_(ss), [[
+      new Date(), getEditorEmail_({}), sheet.getName(), '', '', '', '', '',
+      'Date', 'Unsorted',
+      'Ascending date order; ' + result.moved + ' rows moved', 'Sorted by date'
+    ]]);
+    SpreadsheetApp.flush();
+    var message = sheet.getName() + ': ' + result.count +
+      ' dated purchases checked; ' + result.moved +
+      ' row(s) moved into date order.';
+    if (dayRepaired) {
+      message += '\nDay column rebuilt: ' + dayRepaired + ' formula(s).';
+    }
+    if (dayError) {
+      message += '\nDay column could not be rebuilt: ' + dayError;
+    }
+    alert_(message);
+  } catch (err) {
+    alert_('Could not sort ' + sheet.getName() + ': ' + (err.message || err));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+function sortAllLogsByDate() {
+  var ss = SpreadsheetApp.getActive();
+  var ui = SpreadsheetApp.getUi();
+  var logs = [];
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (LOG_RE.test(sheets[i].getName())) logs.push(sheets[i]);
+  }
+  if (!logs.length) {
+    alert_('There are no year logs in this workbook.');
+    return;
+  }
+
+  var logNames = logs.map(function (log) { return log.getName(); }).join(', ');
+  var response = ui.alert(
+    'Sort all year logs by date',
+    'Logs: ' + logNames + '\n\n' +
+    'Every YYYY Log will be placed in ascending date order. Row numbers will change. ' +
+    'Totals and summaries are not affected.\n\nContinue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    alert_('Another entry is saving. Please try again.');
+    return;
+  }
+
+  try {
+    var audit = ensureAuditSheet_(ss);
+    var email = getEditorEmail_({});
+    var now = new Date();
+    var lines = [];
+    var failures = [];
+    var warnings = [];
+
+    for (var j = 0; j < logs.length; j++) {
+      var log = logs[j];
+      try {
+        var result = sortLogByDate_(log);
+        if (!result.count) {
+          lines.push(log.getName() + ': no dated purchases');
+        } else if (!result.moved) {
+          lines.push(log.getName() + ': already in order');
+        } else {
+          var dayRepaired = 0;
+          var dayError = null;
+          try {
+            dayRepaired = fillDayFormulas_(log);
+          } catch (dayErr) {
+            dayError = dayErr.message || String(dayErr);
+          }
+
+          appendAuditRows_(audit, [[
+            now, email, log.getName(), '', '', '', '', '',
+            'Date', 'Unsorted',
+            'Ascending date order; ' + result.moved + ' rows moved', 'Sorted by date'
+          ]]);
+          var line = log.getName() + ': ' + result.count + ' dated purchases, ' +
+            result.moved + ' moved';
+          if (dayRepaired) line += ', ' + dayRepaired + ' Day formula(s) filled';
+          if (dayError) warnings.push(log.getName() + ' Day column: ' + dayError);
+          lines.push(line);
+        }
+      } catch (err) {
+        failures.push(log.getName() + ': ' + (err.message || err));
+      }
+    }
+
+    SpreadsheetApp.flush();
+    var message = lines.join('\n');
+    if (failures.length) {
+      message += (message ? '\n\n' : '') + 'Could not sort:\n' + failures.join('\n');
+    }
+    if (warnings.length) {
+      message += (message ? '\n\n' : '') + 'Day column warnings:\n' +
+        warnings.join('\n');
+    }
+    alert_(message || 'No year logs were sorted.');
+  } catch (err) {
+    alert_('Could not sort the year logs: ' + (err.message || err));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+function fillAllDayColumns() {
+  var ss = SpreadsheetApp.getActive();
+  var ui = SpreadsheetApp.getUi();
+  var logs = [];
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (LOG_RE.test(sheets[i].getName())) logs.push(sheets[i]);
+  }
+  if (!logs.length) {
+    alert_('There are no year logs in this workbook.');
+    return;
+  }
+
+  var logNames = logs.map(function (log) { return log.getName(); }).join(', ');
+  var response = ui.alert(
+    'Fill Day column',
+    'Logs: ' + logNames + '\n\n' +
+    'B5:B5004 will be filled with the Day formula in every year log. ' +
+    'Existing dates, purchasers, amounts and totals are not changed.\n\nContinue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    alert_('Another entry is saving. Please try again.');
+    return;
+  }
+
+  try {
+    var lines = [];
+    var failures = [];
+    for (var j = 0; j < logs.length; j++) {
+      var log = logs[j];
+      try {
+        var repaired = fillDayFormulas_(log);
+        lines.push(log.getName() + ': ' +
+          (repaired ? repaired + ' Day formula(s) filled' : 'already complete'));
+      } catch (err) {
+        failures.push(log.getName() + ': ' + (err.message || err));
+      }
+    }
+
+    SpreadsheetApp.flush();
+    var message = lines.join('\n');
+    if (failures.length) {
+      message += (message ? '\n\n' : '') + 'Could not fill:\n' + failures.join('\n');
+    }
+    alert_(message || 'No year logs were filled.');
+  } catch (err) {
+    alert_('Could not fill the Day column: ' + (err.message || err));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+function shouldSortAfterEdit_(sheet, rows) {
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    if (isCompletePurchaseRow_(
+      sheet.getRange(row, COL_DATE).getValue(),
+      sheet.getRange(row, COL_PURCHASER).getValue(),
+      sheet.getRange(row, COL_AMOUNT).getValue(),
+      sheet.getRange(row, COL_CAR).getValue()
+    )) {
+      return true;
+    }
+  }
+  return false;
+}
+
+
+function isCompletePurchaseRow_(date, purchaser, amount, car) {
+  return isValidDate_(date) &&
+    !isBlank_(purchaser) &&
+    isFinite(Number(amount)) && Number(amount) > 0 &&
+    !isBlank_(car);
 }
 
 
@@ -475,6 +903,17 @@ function isBlank_(value) {
   if (value === '' || value === null || value === undefined) return true;
   if (typeof value === 'string' && value.trim() === '') return true;
   return false;
+}
+
+
+function isValidDate_(value) {
+  return value instanceof Date && !isNaN(value.getTime());
+}
+
+
+function dayKey_(date) {
+  return date.getFullYear() * 10000 + (date.getMonth() + 1) * 100 +
+    date.getDate();
 }
 
 
@@ -888,7 +1327,7 @@ function showLogHealth() {
   if (!findings.length) {
     ui.alert(
       'Log health check',
-      'No gaps, hidden rows, possible duplicates or missing fields were found in the year logs.',
+      'No gaps, hidden rows, possible duplicates, missing fields, Day errors or out-of-order dates were found in the year logs.',
       ui.ButtonSet.OK
     );
     return;
@@ -896,8 +1335,9 @@ function showLogHealth() {
 
   var issueOrder = [
     'Row gap', 'Hidden rows', 'Possible duplicate', 'Missing date',
-    'Invalid date', 'Missing car number', 'Missing purchaser',
-    'Purchaser not in Settings', 'Missing amount', 'Date outside log year'
+    'Invalid date', 'Missing day', 'Day mismatch', 'Missing car number',
+    'Missing purchaser', 'Purchaser not in Settings', 'Missing amount',
+    'Date outside log year', 'Dates out of order'
   ];
   var counts = {};
   for (var i = 0; i < findings.length; i++) {
@@ -985,6 +1425,8 @@ function scanLogHealth_(ss) {
     var firstRow = -1;
     var lastRow = -1;
     var row;
+    var previousDate = null;
+    var previousRow = -1;
 
     for (var i = 0; i < values.length; i++) {
       if (healthRowHasData_(values[i])) {
@@ -1049,6 +1491,39 @@ function scanLogHealth_(ss) {
           issue: 'Date outside log year',
           detail: 'The date is ' + formatDate_(date, 'd MMM yyyy') +
             ', not in ' + year + '.'
+        });
+      }
+
+      if (previousDate && dayKey_(date) < dayKey_(previousDate)) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: String(row),
+          issue: 'Dates out of order',
+          detail: formatDate_(date, 'd MMM yyyy') + ' is earlier than ' +
+            formatDate_(previousDate, 'd MMM yyyy') + ' on row ' + previousRow + '.'
+        });
+      }
+      previousDate = date;
+      previousRow = row;
+
+      var expectedDay = formatDate_(date, 'EEEE');
+      var rawDay = rowValues[1];
+      var dayValue = String(rawDay === null || rawDay === undefined ? '' : rawDay)
+        .trim();
+      if (!dayValue) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: String(row),
+          issue: 'Missing day',
+          detail: 'The Day column is blank; expected ' + expectedDay + '.'
+        });
+      } else if (dayValue.toLowerCase() !== expectedDay.toLowerCase()) {
+        findings.push({
+          sheet: sheet.getName(),
+          rows: String(row),
+          issue: 'Day mismatch',
+          detail: 'The Day column says "' + dayValue + '"; expected ' +
+            expectedDay + '.'
         });
       }
 
