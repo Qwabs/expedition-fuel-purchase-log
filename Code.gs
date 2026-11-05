@@ -22,6 +22,8 @@ var COL_CAR = 5;         // E
 var COL_ENTERED_BY = 6;  // F
 var COL_ENTERED_AT = 7;  // G
 
+var CURRENCY_FORMAT = '"GH₵"#,##0.00';
+
 var AUDIT_HEADER_ROW = 4;
 var AUDIT_WIDTH = 12;
 var ENTRY_COLUMNS = [COL_DATE, COL_PURCHASER, COL_AMOUNT, COL_CAR];
@@ -64,6 +66,7 @@ function onOpen() {
     .addItem('Sort log by date', 'sortCurrentLogByDate')
     .addItem('Sort all year logs by date', 'sortAllLogsByDate')
     .addItem('Fill Day column', 'fillAllDayColumns')
+    .addItem('Format amount columns', 'formatAllAmountColumns')
     .addSeparator()
     .addItem('Mobile form link', 'showMobileFormLink')
     .addItem('Create / refresh mobile form', 'setupMobileForm')
@@ -175,7 +178,7 @@ function appendPurchaseRecord_(ss, date, purchaser, amount, car, email, action, 
 
       ensureDayFormula_(log, row);
       log.getRange(row, COL_DATE).setNumberFormat('dd mmm yyyy');
-      log.getRange(row, COL_AMOUNT).setNumberFormat('"GH₵"#,##0.00');
+      log.getRange(row, COL_AMOUNT).setNumberFormat(CURRENCY_FORMAT);
       log.getRange(row, COL_ENTERED_AT).setNumberFormat('dd mmm yyyy hh:mm');
     } catch (writeErr) {
       var cleared = false;
@@ -233,6 +236,103 @@ function appendPurchaseRecord_(ss, date, purchaser, amount, car, email, action, 
 }
 
 
+/**
+ * Applies the Ghana Cedi number format to amount cells in column D. Numeric
+ * text such as "GH₵1,200.50" is converted to a number first so totals keep
+ * working. Formula cells and non-numeric text are left unchanged.
+ */
+function formatAmountCells_(sheet, row, numRows) {
+  var firstRow = Math.max(row, ENTRY_FIRST_ROW);
+  var lastRow = Math.min(row + numRows - 1, LOG_LAST_ROW);
+  if (lastRow < firstRow) return 0;
+
+  var range = sheet.getRange(firstRow, COL_AMOUNT, lastRow - firstRow + 1, 1);
+  try {
+    var formulas = range.getFormulas();
+    var values = range.getValues();
+    var normalized = [];
+    var changedRows = [];
+    var hasFormula = false;
+
+    for (var i = 0; i < values.length; i++) {
+      var value = values[i][0];
+      var formula = formulas[i][0];
+      if (formula) hasFormula = true;
+
+      var converted = formula ? value : normalizeAmountValue_(value);
+      if (converted !== value) changedRows.push(i);
+      normalized.push([converted]);
+    }
+
+    if (changedRows.length) {
+      if (!hasFormula) {
+        range.setValues(normalized);
+      } else {
+        // Do not overwrite formula cells when only part of the range changed.
+        for (var j = 0; j < changedRows.length; j++) {
+          var changedRow = changedRows[j];
+          sheet.getRange(firstRow + changedRow, COL_AMOUNT)
+            .setValue(normalized[changedRow][0]);
+        }
+      }
+    }
+
+    range.setNumberFormat(CURRENCY_FORMAT);
+    return lastRow - firstRow + 1;
+  } catch (err) {
+    console.log('Amount formatting failed on ' + sheet.getName() + ': ' +
+                (err.message || err));
+    return 0;
+  }
+}
+
+
+function normalizeAmountValue_(value) {
+  if (typeof value !== 'string') return value;
+  var text = value.trim();
+  if (!text) return value;
+
+  var cleaned = text
+    .replace(/GH[SC]?/gi, '')
+    .replace(/[₵¢]/g, '')
+    .replace(/,/g, '')
+    .trim();
+
+  if (!/^[-+]?\d+(?:\.\d+)?$/.test(cleaned)) return value;
+  var number = Number(cleaned);
+  return isFinite(number) ? number : value;
+}
+
+
+/**
+ * Applies the amount format to D5:D5004 of every year log.
+ * Returns the number of year logs updated.
+ */
+function formatAllAmountColumns_(ss) {
+  var sheets = ss.getSheets();
+  var updated = 0;
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+    if (!LOG_RE.test(sheet.getName())) continue;
+    var height = Math.min(LOG_ROWS, sheet.getMaxRows() - ENTRY_FIRST_ROW + 1);
+    if (height <= 0) continue;
+    if (formatAmountCells_(sheet, ENTRY_FIRST_ROW, height)) updated++;
+  }
+  return updated;
+}
+
+
+function formatAllAmountColumns() {
+  var ss = SpreadsheetApp.getActive();
+  var updated = formatAllAmountColumns_(ss);
+  if (!updated) {
+    alert_('There are no year logs in this workbook.');
+    return;
+  }
+  alert_('Amounts in ' + updated + ' year log(s) are formatted as GH₵.');
+}
+
+
 function auditOnEdit(e) {
   if (!e || !e.range) return;
 
@@ -245,6 +345,10 @@ function auditOnEdit(e) {
   var firstCol = range.getColumn();
   var lastCol = range.getLastColumn();
   if (lastCol < COL_DATE || firstCol > COL_CAR) return;
+
+  if (firstCol <= COL_AMOUNT && lastCol >= COL_AMOUNT) {
+    formatAmountCells_(sheet, range.getRow(), range.getNumRows());
+  }
 
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) return;
@@ -870,7 +974,7 @@ function ensureAuditSheet_(ss) {
     sheet.setFrozenRows(AUDIT_HEADER_ROW);
     sheet.getRange('A:A').setNumberFormat('yyyy-mm-dd hh:mm:ss');
     sheet.getRange('E:E').setNumberFormat('d mmm yyyy');
-    sheet.getRange('G:G').setNumberFormat('"GH₵"#,##0.00');
+    sheet.getRange('G:G').setNumberFormat(CURRENCY_FORMAT);
   }
   return sheet;
 }
@@ -885,7 +989,7 @@ function appendAuditRows_(audit, rows) {
                    SpreadsheetApp.BorderStyle.SOLID);
   audit.getRange(start, 1, rows.length, 1).setNumberFormat('yyyy-mm-dd hh:mm:ss');
   audit.getRange(start, 5, rows.length, 1).setNumberFormat('d mmm yyyy');
-  audit.getRange(start, 7, rows.length, 1).setNumberFormat('"GH₵"#,##0.00');
+  audit.getRange(start, 7, rows.length, 1).setNumberFormat(CURRENCY_FORMAT);
   return start;
 }
 
@@ -1292,6 +1396,7 @@ function setupAudit() {
   PropertiesService.getScriptProperties()
     .setProperty(MASTER_SHEET_PROPERTY, ss.getId());
   ensureAuditSheet_(ss);
+  formatAllAmountColumns_(ss);
 
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
@@ -1305,8 +1410,9 @@ function setupAudit() {
   ScriptApp.newTrigger('auditOnChange').forSpreadsheet(ss).onChange().create();
 
   alert_(
-    'Audit triggers installed.\n\nUse Fuel Log > Add Purchase or the mobile Form. ' +
-    'Cell edits and row/column structure changes are written to the Audit Log.'
+    'Audit triggers installed and Amount columns formatted as GH₵.\n\n' +
+    'Use Fuel Log > Add Purchase or the mobile Form. Cell edits and ' +
+    'row/column structure changes are written to the Audit Log.'
   );
 }
 
@@ -1967,7 +2073,7 @@ function refreshWeeklyReport_(data) {
       .setBorder(true, true, true, true, true, true, '#D6DDD8',
                   SpreadsheetApp.BorderStyle.SOLID);
     sheet.getRange(row, 1).setNumberFormat('dd mmm yyyy');
-    sheet.getRange(row, 5).setNumberFormat('"GH₵"#,##0.00');
+    sheet.getRange(row, 5).setNumberFormat(CURRENCY_FORMAT);
     sheet.getRange(row, 5).setHorizontalAlignment('right');
     sheet.getRange(row, 2).setHorizontalAlignment('center');
     sheet.setRowHeight(row, 20);
@@ -1989,14 +2095,14 @@ function refreshWeeklyReport_(data) {
   sheet.getRange(row, 1).setValue('Purchases').setFontWeight('bold');
   sheet.getRange(row, 2).setValue(data.count).setHorizontalAlignment('center');
   sheet.getRange(row, 4).setValue('Total').setFontWeight('bold');
-  sheet.getRange(row, 5).setValue(data.total).setNumberFormat('"GH₵"#,##0.00')
+  sheet.getRange(row, 5).setValue(data.total).setNumberFormat(CURRENCY_FORMAT)
     .setHorizontalAlignment('right');
   sheet.getRange(row, 1, 1, 5).setBackground('#FBF7EC')
     .setBorder(true, true, true, true, true, true, '#D6DDD8',
                 SpreadsheetApp.BorderStyle.SOLID);
   row++;
   sheet.getRange(row, 1).setValue('Average').setFontWeight('bold');
-  sheet.getRange(row, 2).setValue(data.average).setNumberFormat('"GH₵"#,##0.00')
+  sheet.getRange(row, 2).setValue(data.average).setNumberFormat(CURRENCY_FORMAT)
     .setHorizontalAlignment('center');
   sheet.getRange(row, 1, 1, 5).setBackground('#FBF7EC')
     .setBorder(true, true, true, true, true, true, '#D6DDD8',
@@ -2020,7 +2126,7 @@ function refreshWeeklyReport_(data) {
       .setBackground(p % 2 === 0 ? '#FFFFFF' : '#FBF9F2')
       .setBorder(true, true, true, true, true, true, '#D6DDD8',
                   SpreadsheetApp.BorderStyle.SOLID);
-    sheet.getRange(row, 3).setNumberFormat('"GH₵"#,##0.00')
+    sheet.getRange(row, 3).setNumberFormat(CURRENCY_FORMAT)
       .setHorizontalAlignment('right');
     sheet.getRange(row, 2).setHorizontalAlignment('center');
     row++;
@@ -2048,7 +2154,7 @@ function refreshWeeklyReport_(data) {
       .setBackground(c2 % 2 === 0 ? '#FFFFFF' : '#FBF9F2')
       .setBorder(true, true, true, true, true, true, '#D6DDD8',
                   SpreadsheetApp.BorderStyle.SOLID);
-    sheet.getRange(row, 3).setNumberFormat('"GH₵"#,##0.00')
+    sheet.getRange(row, 3).setNumberFormat(CURRENCY_FORMAT)
       .setHorizontalAlignment('right');
     sheet.getRange(row, 2).setHorizontalAlignment('center');
     row++;

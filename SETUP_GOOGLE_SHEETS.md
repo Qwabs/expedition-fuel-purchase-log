@@ -47,14 +47,15 @@ The Sheet, Form, script and triggers must be owned by the designated owner Googl
 4. Create an HTML file: **+ → HTML**, name it exactly **Sidebar**, paste
    `Sidebar.html`.
 5. Save the project as “Fuel Log”.
-6. Run **setupAudit** once and approve the authorization prompts. It installs both the edit and change triggers.
+6. Run **setupAudit** once and approve the authorization prompts. It installs both
+   the edit and change triggers and formats the Amount columns as GH₵.
 7. Run **setupMobileForm** once and approve any additional Form/Drive prompts.
 
 If you are upgrading an existing Sheet, replace `Code.gs` and run `setupAudit` again.
-That installs the new `auditOnChange` trigger without changing any log rows. After
-upgrading, run **Fuel Log → Fill Day column** once, then **Fuel Log → Sort all year
-logs by date** once. The first repairs existing Day cells; the second puts existing
-purchases in date order.
+That installs the new `auditOnChange` trigger and formats the Amount columns without
+otherwise changing purchase values. After upgrading, run **Fuel Log → Fill Day
+column** once, then **Fuel Log → Sort all year logs by date** once. The first repairs
+existing Day cells; the second puts existing purchases in date order.
 
 Reload the Sheet. The **Fuel Log** menu should offer:
 
@@ -64,6 +65,8 @@ Reload the Sheet. The **Fuel Log** menu should offer:
   ascending date order.
 - **Sort all year logs by date** — sorts every `YYYY Log` in the workbook.
 - **Fill Day column** — fills the Day formula in `B5:B5004` of every `YYYY Log`.
+- **Format amount columns** — applies the GH₵ number format to `D5:D5004` of every
+  `YYYY Log`.
 - **Mobile form link** — shows the responder URL and refreshes the Settings link.
 - **Create / refresh mobile form**
 - **Sync mobile form purchasers**
@@ -140,6 +143,12 @@ A successful “Purchase added” message therefore means both records exist. Di
 corrections to log rows A–E are audited by `auditOnEdit`; the original Entered by/at
 is not overwritten. Pasting several cells logs one row per changed field. A date
 correction on a complete purchase row is sorted into date order automatically.
+
+Amounts typed or pasted into column D of a `YYYY Log` are formatted as Ghana Cedis
+automatically: `1234.5` displays as `GH₵1,234.50`. Text such as `GH₵1,200.50` is
+stored as the number `1200.5` so totals continue to work. If an older log still
+shows plain numbers, run **Fuel Log → Format amount columns** (or rerun
+`setupAudit`) once.
 
 ## 7. Weekly report and email
 
